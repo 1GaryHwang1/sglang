@@ -2178,6 +2178,17 @@ class PdRoleSwitchReqOutput(BaseReq, kw_only=True):
     new_role: str = ""
     safe_to_restore: bool = False
 
+class SchedulePolicySwitchReqInput(BaseReq, kw_only=True):
+    # Target policy; "" is an invalid sentinel rejected by the handler.
+    new_schedule_policy: Literal['lpm', 'dfs-weight', 'hrrn', 'shortest-prefill-first', 'fcfs', 'lof', 'random', 'routing-key'] 
+
+
+class SchedulePolicySwitchReqOutput(BaseReq, kw_only=True):
+    success: bool = False
+    message: str = ""
+    old_schedule_policy: str = ""
+    new_schedule_policy: str = ""
+
 
 class AbortReq(BaseReq, kw_only=True):
     # Whether to abort all requests

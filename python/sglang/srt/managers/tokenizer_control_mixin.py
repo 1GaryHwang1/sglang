@@ -65,6 +65,8 @@ from sglang.srt.managers.io_struct import (
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
     ScaleElasticEPReqOutput,
+    SchedulePolicySwitchReqInput,
+    SchedulePolicySwitchReqOutput,
     SendWeightsToRemoteInstanceReqInput,
     SendWeightsToRemoteInstanceReqOutput,
     SetInternalStateReq,
@@ -124,6 +126,7 @@ _COMMUNICATOR_SPECS = [
     ("check_weights", CheckWeightsReqOutput),
     ("slow_down", SlowDownReqOutput),
     ("pd_role_switch", PdRoleSwitchReqOutput),
+    ("schedule_policy_switch", SchedulePolicySwitchReqOutput),
     ("flush_cache", FlushCacheReqOutput),
     ("add_external_corpus", AddExternalCorpusReqOutput),
     ("remove_external_corpus", RemoveExternalCorpusReqOutput),
@@ -947,6 +950,28 @@ class TokenizerControlMixin:
             old_role=results[0].old_role if results else "",
             new_role=obj.new_role,
             safe_to_restore=safe_to_restore,
+        )
+
+    async def schedule_policy_switch(
+        self: TokenizerManager,
+        obj: SchedulePolicySwitchReqInput, 
+        request: Optional[fastapi.Request] = None,
+    ) -> SchedulePolicySwitchReqOutput:
+        self.auto_create_handle_loop()
+        results = await self.schedule_policy_switch_communicator(obj)
+        all_success = all(r.success for r in results)
+        if all_success:
+            self.record_config_updates(
+                "tokenizer.schedule_policy_switch", schedule_policy=obj.new_schedule_policy,
+            )
+            msg = "ok"
+        else:
+            msg = "; ".join(r.message for r in results if not r.success)
+        return SchedulePolicySwitchReqOutput(
+            success=all_success,
+            message=msg,
+            old_schedule_policy=results[0].old_schedule_policy if results else "",
+            new_schedule_policy=obj.new_schedule_policy,
         )
 
     async def get_internal_state(self: TokenizerManager) -> List[Dict[Any, Any]]:

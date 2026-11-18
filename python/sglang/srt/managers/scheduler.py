@@ -171,6 +171,7 @@ from sglang.srt.managers.io_struct import (
     RpcReqOutput,
     ScaleElasticEPReqInput,
     ScaleElasticEPReqOutput,
+    SchedulePolicySwitchReqInput,
     SendWeightsToRemoteInstanceReqInput,
     SendWeightsToRemoteInstanceReqOutput,
     SetInternalStateReq,
@@ -278,6 +279,7 @@ from sglang.srt.managers.scheduler_components.request_receiver import (
 from sglang.srt.managers.scheduler_components.weight_updater import (
     SchedulerWeightUpdaterManager,
 )
+from sglang.srt.managers.scheduler_components import schedule_policy_switch
 from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
 from sglang.srt.managers.scheduler_pp_mixin import SchedulerPPMixin
 from sglang.srt.managers.utils import (
@@ -1281,6 +1283,8 @@ class Scheduler(
         # Set if a role switch tore down the old role but failed to rebuild
         # either the new or the old role; the instance can no longer serve.
         self._pd_role_switch_unhealthy = False
+        # Guards against concurrent/re-entrant Scheduling policy switched.
+        self._schedule_policy_switch_in_progress = False
         # Set by the ShutdownReq handler to break the event loop for graceful shutdown.
         self.gracefully_exit = False
         self.waiting_queue: List[Req] = []
@@ -1791,6 +1795,7 @@ class Scheduler(
                 ),
                 (SlowDownReqInput, self.slow_down),
                 (PdRoleSwitchReqInput, self.handle_pd_role_switch),
+                (SchedulePolicySwitchReqInput, self.handle_schedule_policy_switch),
                 (
                     ProfileReq,
                     lambda req: self.profiler_manager._profile(req),
@@ -5831,6 +5836,9 @@ class Scheduler(
 
     def handle_pd_role_switch(self, recv_req: PdRoleSwitchReqInput):
         return role_switch.handle_pd_role_switch(self, recv_req)
+
+    def handle_schedule_policy_switch(self, recv_req: SchedulePolicySwitchReqInput):
+        return schedule_policy_switch.handle_schedule_policy_switch(self, recv_req)
 
     def _sync_disaggregation_mode_to_subcomponents(self):
         # Push the (possibly flipped) mode into sub-components that cache it.

@@ -282,6 +282,10 @@ class SchedulePolicy:
                 SchedulePolicy._sort_by_priority_and_fcfs(
                     waiting_queue, self.priority_sign
                 )
+            else:
+                waiting_queue.sort(
+                    key=lambda req: req.time_stats.wait_queue_entry_time
+                )
             return
 
         if isinstance(policy, CacheAwarePolicy):
