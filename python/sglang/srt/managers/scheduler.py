@@ -1285,6 +1285,9 @@ class Scheduler(
         self._pd_role_switch_unhealthy = False
         # Guards against concurrent/re-entrant Scheduling policy switched.
         self._schedule_policy_switch_in_progress = False
+        # test schedule policy switch correntness
+        self._schedule_policy_switch_sequence = 0
+        self._pending_policy_switch_snapshot = None
         # Set by the ShutdownReq handler to break the event loop for graceful shutdown.
         self.gracefully_exit = False
         self.waiting_queue: List[Req] = []
@@ -3886,6 +3889,19 @@ class Scheduler(
             running_batch,
             processed_tokens=self.processed_tokens_counter,
         )
+
+        pending = self._pending_policy_switch_snapshot
+        if pending is not None:
+            switch_id, new_schedule_policy = pending
+
+            schedule_policy_switch.record_waiting_snapshot(
+                self,
+                switch_id=switch_id,
+                phase="after_first_rank",
+                new_schedule_policy=new_schedule_policy,
+            )
+
+            self._pending_policy_switch_snapshot = None
 
         if TEST_RETRACT and running_bs > TEST_RETRACT_NO_PREFILL_BS:
             # If we are testing retraction and the running batch size exceeds

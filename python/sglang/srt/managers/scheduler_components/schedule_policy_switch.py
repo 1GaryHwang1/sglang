@@ -1,9 +1,13 @@
 """Runtime schedule policy switch."""
 
+
 from __future__ import annotations
 
+import json
+import os
+
 import logging
-from typing import TYPE_CHECKING, Callable, Optional, Tuple
+from typing import TYPE_CHECKING
 
 from sglang.srt.managers.io_struct import (
     SchedulePolicySwitchReqInput, 
@@ -20,6 +24,38 @@ if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
+
+def record_waiting_snapshot(
+    scheduler: Scheduler,
+    *,
+    switch_id: int,
+    phase: str,
+    new_schedule_policy: str,
+) -> None:
+    path = os.environ.get("SGLANG_SCHEDULE_SWITCH_TRACE")
+    if not path:
+        return
+
+    record = {
+        "switch_id": switch_id,
+        "phase": phase,
+        "policy": scheduler.policy.policy.value,
+        "new_schedule_policy": new_schedule_policy,
+        "waiting": [
+            {
+                "rid": req.rid,
+                "max_new_tokens": req.sampling_params.max_new_tokens,
+                "enqueue_time": req.time_stats.wait_queue_entry_time,
+            }
+            for req in scheduler.waiting_queue
+        ],
+    }
+
+    try:
+        with open(path, "a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.exception("Failed to write scheduling snapshot")
 
 def handle_schedule_policy_switch(scheduler: Scheduler, recv_req: SchedulePolicySwitchReqInput
 ) -> SchedulePolicySwitchReqOutput:
@@ -47,6 +83,16 @@ def handle_schedule_policy_switch(scheduler: Scheduler, recv_req: SchedulePolicy
             new_schedule_policy=new_schedule_policy,
         )
 
+    scheduler._schedule_policy_switch_sequence += 1
+    switch_id = scheduler._schedule_policy_switch_sequence
+
+    record_waiting_snapshot(
+        scheduler=scheduler,
+        switch_id=switch_id,
+        phase="before_switch",
+        new_schedule_policy=new_schedule_policy,
+    )
+
     scheduler._schedule_policy_switch_in_progress = True
 
     try:
@@ -60,6 +106,13 @@ def handle_schedule_policy_switch(scheduler: Scheduler, recv_req: SchedulePolicy
         scheduler.policy = new_policy 
         scheduler.schedule_policy = new_schedule_policy
         get_context().override("scheduler.schedule_policy_switch", schedule_policy=new_schedule_policy)
+
+        scheduler._pending_policy_switch_snapshot = (
+            switch_id,
+            new_schedule_policy,
+        )
+
+        logger.info("Schedule policy switch succeeded: %s -> %s", old_schedule_policy, new_schedule_policy)
         return SchedulePolicySwitchReqOutput(
             success=True, 
             message="ok", 
