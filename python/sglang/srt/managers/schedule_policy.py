@@ -283,8 +283,8 @@ class SchedulePolicy:
                     waiting_queue, self.priority_sign
                 )
             else:
-                waiting_queue.sort(
-                    key=lambda req: req.time_stats.wait_queue_entry_time
+                SchedulePolicy._sort_by_fcfs(
+                    waiting_queue
                 )
             return
 
@@ -573,6 +573,11 @@ class SchedulePolicy:
                 x.time_stats.wait_queue_entry_time,
             )
         )
+
+    @staticmethod
+    def _sort_by_fcfs(waiting_queue: List[Req]) -> None:
+        """Sorts the waiting queue by received timestamp"""
+        waiting_queue.sort(key=lambda x: x.time_stats.wait_queue_entry_time)
 
     @staticmethod
     def _sort_by_routing_key(
