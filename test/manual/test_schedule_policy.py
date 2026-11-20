@@ -2,11 +2,7 @@ import unittest
 from array import array
 
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
-from sglang.srt.managers.schedule_policy import (
-    CacheAgnosticPolicy,
-    CacheAwarePolicy,
-    SchedulePolicy,
-)
+from sglang.srt.managers.schedule_policy import SchedulePolicy
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.test.test_utils import CustomTestCase
@@ -36,7 +32,7 @@ class TestSchedulePolicy(CustomTestCase):
             enable_priority_scheduling=False,
             schedule_low_priority_values_first=False,
         )
-        self.assertEqual(policy.policy, CacheAwarePolicy.LPM)
+        self.assertEqual(policy.policy.name, "lpm")
 
     def test_init_with_cache_agnostic_policy(self):
         policy = SchedulePolicy(
@@ -46,7 +42,7 @@ class TestSchedulePolicy(CustomTestCase):
             enable_priority_scheduling=False,
             schedule_low_priority_values_first=False,
         )
-        self.assertEqual(policy.policy, CacheAgnosticPolicy.FCFS)
+        self.assertEqual(policy.policy.name, "fcfs")
 
     def test_init_with_unknown_policy(self):
         with self.assertRaises(ValueError):
@@ -67,7 +63,7 @@ class TestSchedulePolicy(CustomTestCase):
             enable_priority_scheduling=False,
             schedule_low_priority_values_first=False,
         )
-        self.assertEqual(policy.policy, CacheAgnosticPolicy.FCFS)
+        self.assertEqual(policy.policy.name, "fcfs")
 
     def test_calc_priority_fcfs(self):
         tree_cache = RadixCache.create_simulated()
