@@ -3,7 +3,7 @@ from array import array
 from unittest.mock import patch
 
 from sglang.srt.managers.schedule_batch import Req
-from sglang.srt.managers.schedule_policy import CacheAwarePolicy, SchedulePolicy
+from sglang.srt.managers.schedule_policy import SchedulePolicy
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -100,8 +100,7 @@ class TestSchedulePolicyHRRN(CustomTestCase):
         length can sort differently by HRRN. Also verifies rid tie-break for
         equal-ratio reqs.
 
-        Uses _sort_by_hrrn directly to bypass the prefix-match pass inside
-        calc_priority, which would overwrite num_matched_prefix_tokens.
+        Stub prefix matching to preserve the assigned cached prefix lengths.
         """
         r_more_cached = _make_req("a", "x" * 100, list(range(100)))
         r_less_cached = _make_req("b", "x" * 100, list(range(100)))
@@ -118,7 +117,15 @@ class TestSchedulePolicyHRRN(CustomTestCase):
         r_tie.arrival_processed_tokens = 0
 
         waiting_queue = [r_tie, r_less_cached, r_more_cached]
-        SchedulePolicy._sort_by_hrrn(waiting_queue, set(), processed_tokens=1000)
+        policy = SchedulePolicy(
+            policy="hrrn",
+            tree_cache=RadixCache.create_simulated(),
+            enable_hierarchical_cache=True,
+            enable_priority_scheduling=False,
+            schedule_low_priority_values_first=False,
+        )
+        with patch.object(policy, "_compute_prefix_matches", return_value=set()):
+            policy.calc_priority(waiting_queue, processed_tokens=1000)
 
         self.assertEqual(waiting_queue[0].rid, "a")
         self.assertEqual(waiting_queue[1].rid, "b")
@@ -156,7 +163,8 @@ class TestShortestPrefillFirst(CustomTestCase):
         older = self.make_req("z", 32, arrived=1)
         newer = self.make_req("a", 32, arrived=2)
         queue = [newer, older]
-        self.policy._sort_by_shortest_prefill(queue, set())
+        with patch.object(self.policy, "_compute_prefix_matches", return_value=set()):
+            self.policy.calc_priority(queue)
         self.assertEqual(queue, [older, newer])
 
     def test_duplicate_prefix_is_deprioritized(self):
@@ -174,7 +182,8 @@ class TestShortestPrefillFirst(CustomTestCase):
         replay.output_ids.extend([0] * 64)
         short = self.make_req("short", 32)
         queue = [replay, short]
-        self.policy._sort_by_shortest_prefill(queue, set())
+        with patch.object(self.policy, "_compute_prefix_matches", return_value=set()):
+            self.policy.calc_priority(queue)
         self.assertEqual(queue, [short, replay])
 
     def test_chunk_limit_reserves_complete_short_prefills(self):
@@ -216,7 +225,7 @@ class TestShortestPrefillFirst(CustomTestCase):
                 )
 
     def test_other_policy_keeps_normal_chunk_limit(self):
-        self.policy.policy = CacheAwarePolicy.HRRN
+        self.policy.activate("hrrn")
         self.assertIsNone(
             self.policy.shortest_prefill_chunk_limit(
                 self.make_req("continuation", 8192),

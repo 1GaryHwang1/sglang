@@ -2,11 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
-from sglang.srt.managers.schedule_policy import (
-    CacheAgnosticPolicy,
-    CacheAwarePolicy,
-    SchedulePolicy,
-)
+from sglang.srt.managers.schedule_policy import SchedulePolicy
 from sglang.srt.managers.scheduler_components.load_inquirer import (
     SchedulerLoadInquirer,
 )
@@ -17,22 +13,26 @@ register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
 class TestSchedulePolicyWaitingQueueMatching(unittest.TestCase):
     def make_policy(self, policy, supports_fast_match_prefix):
-        schedule_policy = object.__new__(SchedulePolicy)
-        schedule_policy.policy = policy
-        schedule_policy.tree_cache = SimpleNamespace(
-            supports_fast_match_prefix=lambda: supports_fast_match_prefix
+        return SchedulePolicy(
+            policy=policy,
+            tree_cache=SimpleNamespace(
+                disable=False,
+                supports_fast_match_prefix=lambda: supports_fast_match_prefix,
+            ),
+            enable_hierarchical_cache=False,
+            enable_priority_scheduling=False,
+            schedule_low_priority_values_first=False,
         )
-        return schedule_policy
 
     def test_cache_agnostic_policy_requires_fast_matching(self):
-        policy = self.make_policy(CacheAgnosticPolicy.FCFS, False)
+        policy = self.make_policy("fcfs", False)
         self.assertFalse(policy.waiting_queue_prefix_matched([]))
 
         policy.tree_cache = SimpleNamespace(supports_fast_match_prefix=lambda: True)
         self.assertTrue(policy.waiting_queue_prefix_matched([]))
 
     def test_lpm_queue_limit_respects_fast_matching_capability(self):
-        policy = self.make_policy(CacheAwarePolicy.LPM, False)
+        policy = self.make_policy("lpm", False)
         self.assertTrue(policy.waiting_queue_prefix_matched([None] * 128))
         self.assertFalse(policy.waiting_queue_prefix_matched([None] * 129))
 
