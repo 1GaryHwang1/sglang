@@ -962,10 +962,11 @@ class TokenizerControlMixin:
     ) -> SchedulePolicySwitchReqOutput:
         self.auto_create_handle_loop()
         results = await self.schedule_policy_switch_communicator(obj)
-        all_success = all(r.success for r in results)
+        all_success = bool(results) and all(r.success for r in results)
         if all_success:
+            actual_policy = results[0].new_schedule_policy
             self.record_config_updates(
-                "tokenizer.schedule_policy_switch", schedule_policy=obj.new_schedule_policy,
+                "tokenizer.schedule_policy_switch", schedule_policy=actual_policy,
             )
             msg = "ok"
         else:
@@ -974,7 +975,7 @@ class TokenizerControlMixin:
             success=all_success,
             message=msg,
             old_schedule_policy=results[0].old_schedule_policy if results else "",
-            new_schedule_policy=obj.new_schedule_policy,
+            new_schedule_policy=results[0].new_schedule_policy if all_success else obj.new_schedule_policy,
         )
 
     async def schedule_policy_register(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from array import array
 
@@ -37,7 +38,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import lru_cache
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Callable
 
 import torch
 
@@ -217,27 +218,14 @@ def match_prefix_for_req(
     return match_result
 
 
-class CacheAwarePolicy(Enum):
-    """Scheduling policies that are aware of the tree cache."""
-
-    LPM = "lpm"  # longest prefix match
-    DFS_WEIGHT = "dfs-weight"  # depth-first search weighting
-    HRRN = "hrrn"  # highest response ratio next, token-based aging
-    SHORTEST_PREFILL_FIRST = "shortest-prefill-first"
-
-
-class CacheAgnosticPolicy(Enum):
-    """Scheduling policies that are not aware of the tree cache."""
-
-    FCFS = "fcfs"  # first come first serve
-    LOF = "lof"  # longest output first
-    RANDOM = "random"
-    ROUTING_KEY = "routing-key"  # prioritize by routing key frequency in running batch
+@dataclass(frozen=True)
+class PolicyEntry:
+    name: str
+    rank: Callable
+    parameters: tuple[str, ...]
 
 
 class SchedulePolicy:
-    Policy = Union[CacheAwarePolicy, CacheAgnosticPolicy]
-
     def __init__(
         self,
         policy: str,
@@ -246,7 +234,6 @@ class SchedulePolicy:
         enable_priority_scheduling: bool,
         schedule_low_priority_values_first: bool,
     ):
-        self.policy = self._validate_and_adjust_policy(policy, tree_cache)
         self.tree_cache = tree_cache
         self.enable_hierarchical_cache = enable_hierarchical_cache
         self.enable_priority_scheduling = enable_priority_scheduling
@@ -256,127 +243,91 @@ class SchedulePolicy:
 
         # It is used to find the matching prefix for in-batch prefix caching.
         self.waiting_queue_radix_tree = RadixCache.create_simulated()
+        self.policy_registry: dict[str, PolicyEntry] = {}
 
-    def calc_priority(
-        self,
-        waiting_queue: List[Req],
-        running_batch: Optional[ScheduleBatch] = None,
-        processed_tokens: int = 0,
-    ) -> None:
-        policy = self._determine_active_policy(waiting_queue)
+        self.init_builtin_schedule_policy()
+        self.policy = self._validate_and_adjust_policy(policy, tree_cache)
 
-        # Populate req.num_matched_prefix_tokens at schedule time. Cache-aware policies
-        # set it in _compute_prefix_matches; do the same full match for
-        # cache-agnostic policies when the radix supports it, so the load
-        # snapshot has it. Skip on decode (never prefills).
-        if (
-            not isinstance(policy, CacheAwarePolicy)
-            and self.tree_cache.supports_fast_match_prefix()
-            and get_disagg().disaggregation_mode != "decode"
-        ):
-            for r in waiting_queue:
-                match_prefix_for_req(self.tree_cache, r, include_req=True)
+    def init_builtin_schedule_policy(self) -> None:
+        fcfs_rank = (
+            self._sort_by_priority_and_fcfs
+            if self.enable_priority_scheduling
+            else self._sort_by_fcfs
+        )
 
-        if self.policy == CacheAgnosticPolicy.FCFS:
-            if self.enable_priority_scheduling:
-                SchedulePolicy._sort_by_priority_and_fcfs(
-                    waiting_queue, self.priority_sign
-                )
-            else:
-                SchedulePolicy._sort_by_fcfs(
-                    waiting_queue
-                )
-            return
+        self.register("fcfs", fcfs_rank)
+        self.register("lpm", self._sort_by_longest_prefix)
+        self.register("dfs-weight", self._sort_by_dfs_weight)
+        self.register("hrrn", self._sort_by_hrrn)
+        self.register("shortest-prefill-first", self._sort_by_shortest_prefill)
+        self.register("lof", self._sort_by_longest_output)
+        self.register("routing-key", self._sort_by_routing_key)
+        self.register("random", self._sort_randomly)
 
-        if isinstance(policy, CacheAwarePolicy):
-            temporary_deprioritized = self._compute_prefix_matches(
-                waiting_queue, policy
-            )
-            if policy == CacheAwarePolicy.LPM:
-                SchedulePolicy._sort_by_longest_prefix(
-                    waiting_queue, temporary_deprioritized
-                )
-            elif policy == CacheAwarePolicy.DFS_WEIGHT:
-                SchedulePolicy._sort_by_dfs_weight(waiting_queue, self.tree_cache)
-            elif policy == CacheAwarePolicy.HRRN:
-                SchedulePolicy._sort_by_hrrn(
-                    waiting_queue, temporary_deprioritized, processed_tokens
-                )
-            elif policy == CacheAwarePolicy.SHORTEST_PREFILL_FIRST:
-                SchedulePolicy._sort_by_shortest_prefill(
-                    waiting_queue, temporary_deprioritized
-                )
-                self._shortest_prefill_calls += 1
-                if waiting_queue and self._shortest_prefill_calls % 128 == 1:
-                    logger.info(
-                        "Experimental shortest-prefill-first: queue=%d shortest_uncached=%d",
-                        len(waiting_queue),
-                        self._shortest_prefill_work(waiting_queue[0]),
-                    )
-            else:
-                raise ValueError(f"Unknown CacheAware Policy: {policy=}")
-        else:
-            if policy == CacheAgnosticPolicy.FCFS:
-                pass
-            elif policy == CacheAgnosticPolicy.LOF:
-                SchedulePolicy._sort_by_longest_output(
-                    waiting_queue,
-                    self.enable_priority_scheduling,
-                    self.priority_sign,
-                )
-            elif policy == CacheAgnosticPolicy.RANDOM:
-                SchedulePolicy._sort_randomly(waiting_queue)
-            elif policy == CacheAgnosticPolicy.ROUTING_KEY:
-                if running_batch is not None:
-                    SchedulePolicy._sort_by_routing_key(waiting_queue, running_batch)
-            else:
-                raise ValueError(f"Unknown CacheAgnostic Policy: {policy=}")
 
-    def _determine_active_policy(self, waiting_queue: List[Req]) -> Policy:
-        if (
-            self.policy
-            in (
-                CacheAwarePolicy.LPM,
-                CacheAwarePolicy.HRRN,
-            )
-            and len(waiting_queue) > 128
-        ):
-            # Turn off the expensive prefix matching and sorting when the #queue is large.
-            return CacheAgnosticPolicy.FCFS
+    def register(self, name, rank_fn):
+        name = name.strip().lower()
+
+        if not name:
+            raise ValueError("policy name must not be empty")
+
+        if name in self.policy_registry:
+            raise ValueError(f"Policy already registered: {name}")
+
+        if not callable(rank_fn):
+            raise ValueError("rank_fn must be callable")
+
+        signature = inspect.signature(rank_fn)
+        parameters = []
+
+        for parameter in signature.parameters.values():
+            parameters.append(parameter.name)
+
+        self.policy_registry[name] = PolicyEntry(
+            name=name,
+            rank=rank_fn,
+            parameters=tuple(parameters),
+        )
+
+    def activate(self, name: str) -> None:
+        self.policy = self._validate_and_adjust_policy(name, self.tree_cache)
+
+    def calc_priority(self, waiting_queue: List[Req], *args, **kwargs):
+        return self.policy.rank(waiting_queue, *args, **kwargs)
+
+    def _determine_active_policy(self, waiting_queue: List[Req]) -> PolicyEntry:
+        if self.policy.name in ("lpm", "hrrn") and len(waiting_queue) > 128:
+            # Large LPM/HRRN queues use FCFS to skip expensive prefix matching.
+            return self.policy_registry["fcfs"]
         return self.policy
 
     def waiting_queue_prefix_matched(self, waiting_queue: List[Req]) -> bool:
         policy = self._determine_active_policy(waiting_queue)
         return (
-            isinstance(policy, CacheAwarePolicy)
+            policy.name in ("lpm", "dfs-weight", "hrrn", "shortest-prefill-first")
             or self.tree_cache.supports_fast_match_prefix()
         )
 
     def _validate_and_adjust_policy(
         self, policy: str, tree_cache: BasePrefixCache
-    ) -> Policy:
-        """
-        Validates the policy and adjusts it if necessary based on tree cache settings.
-        """
-        try:
-            policy_enum = CacheAwarePolicy(policy)
-            if getattr(tree_cache, "disable", True):
-                if policy_enum == CacheAwarePolicy.SHORTEST_PREFILL_FIRST:
-                    raise ValueError(
-                        "Experimental shortest-prefill-first requires prefix caching"
-                    )
-                # If tree_cache is disabled, using CacheAgnosticPolicy policy
-                return CacheAgnosticPolicy.FCFS
-            return policy_enum
-        except ValueError:
-            try:
-                return CacheAgnosticPolicy(policy)
-            except ValueError:
-                raise ValueError(f"Unknown schedule_policy: {policy=}")
+    ) -> PolicyEntry:
+        """Resolve a registered policy and apply prefix-cache requirements."""
+        name = policy.strip().lower()
+        entry = self.policy_registry.get(name)
+        if entry is None:
+            raise ValueError(f"Unknown schedule policy: {name!r}")
 
-    def _compute_prefix_matches(
-        self, waiting_queue: List[Req], policy: CacheAwarePolicy
-    ) -> Set[int]:
+        if getattr(tree_cache, "disable", True):
+            if name == "shortest-prefill-first":
+                raise ValueError(
+                    "Experimental shortest-prefill-first requires prefix caching"
+                )
+            if name in ("lpm", "dfs-weight", "hrrn"):
+                return self.policy_registry["fcfs"]
+
+        return entry
+
+    def _compute_prefix_matches(self, waiting_queue: List[Req]) -> Set[int]:
         """
         Computes and caches the matching prefixes for requests in the waiting queue,
             and handles in-batch prefix caching logic.
@@ -433,6 +384,15 @@ class SchedulePolicy:
                     )
         return temporary_deprioritized
 
+    def _match_prefixes_for_load(self, waiting_queue: List[Req]) -> None:
+        """Populate load-reporting data for sorts that do not use cache matches."""
+        if (
+            self.tree_cache.supports_fast_match_prefix()
+            and get_disagg().disaggregation_mode != "decode"
+        ):
+            for req in waiting_queue:
+                match_prefix_for_req(self.tree_cache, req, include_req=True)
+
     @staticmethod
     def _shortest_prefill_work(r: Req) -> int:
         return max(
@@ -440,11 +400,9 @@ class SchedulePolicy:
             len(r.origin_input_ids) + len(r.output_ids) - r.num_matched_prefix_tokens,
         )
 
-    @staticmethod
-    def _sort_by_shortest_prefill(
-        waiting_queue: List[Req], temporary_deprioritized: Set[int]
-    ) -> None:
+    def _sort_by_shortest_prefill(self, waiting_queue: List[Req]) -> None:
         # Prioritize short uncached prefills while deferring duplicate prefixes.
+        temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
         waiting_queue.sort(
             key=lambda r: (
                 r.rid in temporary_deprioritized,
@@ -452,15 +410,19 @@ class SchedulePolicy:
                 r.time_stats.wait_queue_entry_time,
             )
         )
+        self._shortest_prefill_calls += 1
+        if waiting_queue and self._shortest_prefill_calls % 128 == 1:
+            logger.info(
+                "Experimental shortest-prefill-first: queue=%d shortest_uncached=%d",
+                len(waiting_queue),
+                self._shortest_prefill_work(waiting_queue[0]),
+            )
 
     def shortest_prefill_chunk_limit(
         self, chunked_req: Req, waiting_queue: List[Req], budget: int, page_size: int
     ) -> Optional[int]:
         """Cap the active prefill chunk to reserve tokens for shorter waiting requests."""
-        if (
-            self.policy != CacheAwarePolicy.SHORTEST_PREFILL_FIRST
-            or budget < 2 * page_size
-        ):
+        if self.policy.name != "shortest-prefill-first" or budget < 2 * page_size:
             return None
         remaining = len(chunked_req.full_untruncated_fill_ids) - len(
             chunked_req.prefix_indices
@@ -477,11 +439,14 @@ class SchedulePolicy:
         # Page alignment keeps continuation boundaries allocator-compatible.
         return (budget - reserved) // page_size * page_size
 
-    @staticmethod
-    def _sort_by_longest_prefix(
-        waiting_queue: List[Req], temporary_deprioritized: Set[int]
-    ) -> None:
-        """Sorts the waiting queue based on the longest prefix match."""
+    def _sort_by_longest_prefix(self, waiting_queue: List[Req]) -> None:
+        """Prepare prefix matches and sort by the longest cached prefix."""
+        if len(waiting_queue) > 128:
+            # Turn off the expensive prefix matching and sorting when the #queue is large.
+            self.policy_registry["fcfs"].rank(waiting_queue)
+            return
+
+        temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
         waiting_queue.sort(
             key=lambda r: (
                 -r.num_matched_prefix_tokens
@@ -496,11 +461,8 @@ class SchedulePolicy:
         (all cache levels — device + host via hicache — counted as cached)."""
         return max(0, len(r.origin_input_ids) - r.num_matched_prefix_tokens)
 
-    @staticmethod
     def _sort_by_hrrn(
-        waiting_queue: List[Req],
-        temporary_deprioritized: Set[int],
-        processed_tokens: int,
+        self, waiting_queue: List[Req], processed_tokens: int = 0
     ) -> None:
         """Highest Response Ratio Next, with token-based aging.
 
@@ -514,9 +476,15 @@ class SchedulePolicy:
           - Snapshot `req.arrival_processed_tokens = counter` when the req enters waiting_queue
             (pop_bootstrapped for disagg prefill, _add_request_to_queue for unified).
 
-        Call sites that omit `processed_tokens` (dllm, disagg decode)
-        degrade to rid-lexicographic order; those queues carry no prefill work.
+        Call sites that omit `processed_tokens` use 0, so positive uncached
+        lengths tie and are ordered by rid.
         """
+        if len(waiting_queue) > 128:
+            # Skip the expensive matching pass for large waiting queues.
+            self.policy_registry["fcfs"].rank(waiting_queue)
+            return
+
+        temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
 
         def _key(r: Req):
             rid = r.rid
@@ -532,58 +500,56 @@ class SchedulePolicy:
 
         waiting_queue.sort(key=_key)
 
-    @staticmethod
-    def _sort_by_dfs_weight(
-        waiting_queue: List[Req], tree_cache: BasePrefixCache
-    ) -> None:
+    def _sort_by_dfs_weight(self, waiting_queue: List[Req]) -> None:
         """Sorts the waiting queue based on a depth-first search weighting."""
-        order = tree_cache.dfs_weight_order([req.last_node for req in waiting_queue])
+        self._compute_prefix_matches(waiting_queue)
+        order = self.tree_cache.dfs_weight_order(
+            [req.last_node for req in waiting_queue]
+        )
         waiting_queue[:] = [waiting_queue[index] for index in order]
 
-    @staticmethod
-    def _sort_by_longest_output(
-        waiting_queue: List[Req],
-        enable_priority_scheduling: bool,
-        priority_sign: int,
-    ) -> None:
+    def _sort_by_longest_output(self, waiting_queue: List[Req]) -> None:
         """Sorts the waiting queue based on the longest output (max_new_tokens). If using priority scheduling, sort by priority first."""
-        if enable_priority_scheduling:
+        self._match_prefixes_for_load(waiting_queue)
+        if self.enable_priority_scheduling:
             waiting_queue.sort(
                 key=lambda x: (
-                    x.priority * priority_sign,
+                    x.priority * self.priority_sign,
                     -x.sampling_params.max_new_tokens,
                 )
             )
         else:
             waiting_queue.sort(key=lambda x: -x.sampling_params.max_new_tokens)
 
-    @staticmethod
-    def _sort_randomly(waiting_queue: List[Req]) -> None:
+    def _sort_randomly(self, waiting_queue: List[Req]) -> None:
         """Shuffles the waiting queue randomly."""
+        self._match_prefixes_for_load(waiting_queue)
         random.shuffle(waiting_queue)
 
-    @staticmethod
-    def _sort_by_priority_and_fcfs(
-        waiting_queue: List[Req], priority_sign: int
-    ) -> None:
+    def _sort_by_priority_and_fcfs(self, waiting_queue: List[Req]) -> None:
         """Sorts the waiting queue based on the request priority then received titmestamp."""
+        self._match_prefixes_for_load(waiting_queue)
         waiting_queue.sort(
             key=lambda x: (
-                x.priority * priority_sign,
+                x.priority * self.priority_sign,
                 x.time_stats.wait_queue_entry_time,
             )
         )
 
-    @staticmethod
-    def _sort_by_fcfs(waiting_queue: List[Req]) -> None:
+    def _sort_by_fcfs(self, waiting_queue: List[Req]) -> None:
         """Sorts the waiting queue by received timestamp"""
+        self._match_prefixes_for_load(waiting_queue)
         waiting_queue.sort(key=lambda x: x.time_stats.wait_queue_entry_time)
 
-    @staticmethod
     def _sort_by_routing_key(
-        waiting_queue: List[Req], running_batch: ScheduleBatch
+        self,
+        waiting_queue: List[Req],
+        running_batch: Optional[ScheduleBatch] = None,
     ) -> None:
         """Sorts waiting queue by routing key frequency in running batch."""
+        self._match_prefixes_for_load(waiting_queue)
+        if running_batch is None:
+            return
         routing_key_counts = Counter(
             r.routing_key for r in running_batch.reqs if r.routing_key
         )

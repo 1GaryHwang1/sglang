@@ -1294,7 +1294,6 @@ class Scheduler(
         self._pending_policy_switch_snapshot = None
         # Set by the ShutdownReq handler to break the event loop for graceful shutdown.
         self.gracefully_exit = False
-        self.custom_schedule_policy_registry = {}
         self.waiting_queue: List[Req] = []
         # The running decoding batch for continuous batching
         self.running_batch: ScheduleBatch = ScheduleBatch(reqs=[], batch_is_full=False)
@@ -3890,11 +3889,18 @@ class Scheduler(
             return None, running_batch
 
         # Get priority queue
-        self.policy.calc_priority(
-            self.waiting_queue,
-            running_batch,
-            processed_tokens=self.processed_tokens_counter,
-        )
+        available_parameters = {
+            "running_batch": running_batch,
+            "processed_tokens": self.processed_tokens_counter,
+        }
+
+        kwargs = {
+            name: available_parameters[name]
+            for name in self.policy.policy.parameters
+            if name != "waiting_queue"
+        }
+
+        self.policy.calc_priority(self.waiting_queue, **kwargs)
 
         pending = self._pending_policy_switch_snapshot
         if pending is not None:

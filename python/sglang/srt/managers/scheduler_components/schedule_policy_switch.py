@@ -13,11 +13,6 @@ from sglang.srt.managers.io_struct import (
     SchedulePolicySwitchReqInput, 
     SchedulePolicySwitchReqOutput,
 )
-from sglang.srt.managers.schedule_policy import (
-    CacheAgnosticPolicy, 
-    CacheAwarePolicy, 
-    SchedulePolicy
-)
 from sglang.srt.runtime_context import get_context
 
 if TYPE_CHECKING:
@@ -40,7 +35,7 @@ def record_waiting_snapshot(
     record = {
         "switch_id": switch_id,
         "phase": phase,
-        "policy": scheduler.policy.policy.value,
+        "policy": scheduler.policy.policy.name,
         "new_schedule_policy": new_schedule_policy,
         "waiting": [
             {
@@ -62,7 +57,7 @@ def handle_schedule_policy_switch(scheduler: Scheduler, recv_req: SchedulePolicy
 ) -> SchedulePolicySwitchReqOutput:
     """Switch the scheduler's policy at runtime. The instance do not need to be
     idle."""
-    old_schedule_policy = scheduler.policy.policy.value
+    old_schedule_policy = scheduler.policy.policy.name
     new_schedule_policy = (recv_req.new_schedule_policy or "").lower()
 
     def _fail(msg: str) -> SchedulePolicySwitchReqOutput:
@@ -100,23 +95,25 @@ def handle_schedule_policy_switch(scheduler: Scheduler, recv_req: SchedulePolicy
     scheduler._schedule_policy_switch_in_progress = True
 
     try:
-        new_policy = SchedulePolicy(
-            policy=new_schedule_policy,
-            tree_cache=scheduler.tree_cache,
-            enable_hierarchical_cache=scheduler.enable_hierarchical_cache,
-            enable_priority_scheduling=scheduler.enable_priority_scheduling,
-            schedule_low_priority_values_first=scheduler.schedule_low_priority_values_first,
-        )
-        scheduler.policy = new_policy 
+        scheduler.policy.activate(new_schedule_policy)
+        new_schedule_policy = scheduler.policy.policy.name
         scheduler.schedule_policy = new_schedule_policy
-        get_context().override("scheduler.schedule_policy_switch", schedule_policy=new_schedule_policy)
+        get_context().override(
+            "scheduler.schedule_policy_switch", 
+            schedule_policy=new_schedule_policy,
+        )
 
         scheduler._pending_policy_switch_snapshot = (
             switch_id,
             new_schedule_policy,
         )
 
-        logger.info("Schedule policy switch succeeded: %s -> %s", old_schedule_policy, new_schedule_policy)
+        logger.info(
+            "Schedule policy switch succeeded: %s -> %s", 
+            old_schedule_policy, 
+            new_schedule_policy,
+        )
+
         return SchedulePolicySwitchReqOutput(
             success=True, 
             message="ok", 

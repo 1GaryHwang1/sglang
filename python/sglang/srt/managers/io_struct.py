@@ -2181,7 +2181,7 @@ class PdRoleSwitchReqOutput(BaseReq, kw_only=True):
 
 class SchedulePolicySwitchReqInput(BaseReq, kw_only=True):
     # Target policy; "" is an invalid sentinel rejected by the handler.
-    new_schedule_policy: Literal['lpm', 'dfs-weight', 'hrrn', 'shortest-prefill-first', 'fcfs', 'lof', 'random', 'routing-key'] 
+    new_schedule_policy: str
 
 
 class SchedulePolicySwitchReqOutput(BaseReq, kw_only=True):

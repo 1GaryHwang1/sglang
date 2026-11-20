@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import importlib.util
-import uuid
 import inspect
 import sys
 from pathlib import Path
@@ -18,12 +17,6 @@ from sglang.srt.managers.io_struct import (
     SchedulePolicyRegisterReqInput, 
     SchedulePolicyRegisterReqOutput,
 )
-from sglang.srt.managers.schedule_policy import (
-    CacheAgnosticPolicy, 
-    CacheAwarePolicy, 
-    SchedulePolicy
-)
-from sglang.srt.runtime_context import get_context
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import Scheduler
@@ -50,31 +43,23 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
     if scheduler._schedule_policy_register_in_progress:
         return _fail("another schedule policy register is already in progress")
 
-    scheduler._schedule_policy_register_in_progress = True
-
     if not register_policy_name:
         return _fail("policy_name must not be empty")
+
+    scheduler._schedule_policy_register_in_progress = True
 
     try:
         path = Path(recv_req.register_path).resolve(strict=True)
         if not path.is_file() or path.suffix != ".py":
             raise ValueError("register_path must point to a Python file")
 
-        builtin_policys = {
-            policy.value for enum_type in (CacheAwarePolicy, CacheAgnosticPolicy)
-            for policy in enum_type
-        }
-
-        if register_policy_name in builtin_policys:
-            raise ValueError(f"Cannot override built-in policy: {register_policy_name}")
-
-        if register_policy_name in scheduler.custom_schedule_policy_registry:
+        if register_policy_name in scheduler.policy.policy_registry:
             raise ValueError(f"Policy name already registered: {register_policy_name}")
 
         if not recv_req.register_path.strip():
             raise ValueError("register_path must not be empty")
 
-        module_name = f"_sglang_schedule_policy_{uuid.uuid4().hex}"
+        module_name = f"_sglang_schedule_policy_{register_policy_name}"
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
             raise ValueError(f"Cannot load Python module: {path}")
@@ -89,7 +74,7 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
                 f"{recv_req.func_name!r} is missing or is not callable"
             )
 
-        scheduler.custom_schedule_policy_registry[register_policy_name] = rank_fn
+        scheduler.policy.register(register_policy_name, rank_fn)
 
         logger.info("Registered custom schedule policy: %s", register_policy_name)
         return SchedulePolicyRegisterReqOutput(
