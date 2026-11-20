@@ -32,6 +32,7 @@ def record_waiting_snapshot(
     phase: str,
     new_schedule_policy: str,
 ) -> None:
+    """Check whether the hot-switching function for statistical monitoring is working properly."""
     path = os.environ.get("SGLANG_SCHEDULE_SWITCH_TRACE")
     if not path:
         return
@@ -74,6 +75,9 @@ def handle_schedule_policy_switch(scheduler: Scheduler, recv_req: SchedulePolicy
             old_schedule_policy=old_schedule_policy,
             new_schedule_policy=new_schedule_policy,
         )
+
+    if scheduler._schedule_policy_switch_in_progress:
+        return _fail("another schedule policy switch is already in progress") 
     
     if new_schedule_policy == old_schedule_policy:
         return SchedulePolicySwitchReqOutput(

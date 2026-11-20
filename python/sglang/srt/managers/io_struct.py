@@ -2178,6 +2178,7 @@ class PdRoleSwitchReqOutput(BaseReq, kw_only=True):
     new_role: str = ""
     safe_to_restore: bool = False
 
+
 class SchedulePolicySwitchReqInput(BaseReq, kw_only=True):
     # Target policy; "" is an invalid sentinel rejected by the handler.
     new_schedule_policy: Literal['lpm', 'dfs-weight', 'hrrn', 'shortest-prefill-first', 'fcfs', 'lof', 'random', 'routing-key'] 
@@ -2188,6 +2189,21 @@ class SchedulePolicySwitchReqOutput(BaseReq, kw_only=True):
     message: str = ""
     old_schedule_policy: str = ""
     new_schedule_policy: str = ""
+
+
+class SchedulePolicyRegisterReqInput(BaseReq, kw_only=True):
+    # Schedule policy name, used when switching
+    policy_name: str = ""
+    # The name of the function to load from the file
+    func_name: str = ""
+    # Path to the file containing the function 
+    register_path: str = ""
+
+
+class SchedulePolicyRegisterReqOutput(BaseReq, kw_only=True):
+    success: bool = False
+    message: str = ""
+    new_register_schedule_policy: str = ""
 
 
 class AbortReq(BaseReq, kw_only=True):

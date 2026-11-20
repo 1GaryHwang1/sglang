@@ -171,6 +171,7 @@ from sglang.srt.managers.io_struct import (
     RpcReqOutput,
     ScaleElasticEPReqInput,
     ScaleElasticEPReqOutput,
+    SchedulePolicyRegisterReqInput,
     SchedulePolicySwitchReqInput,
     SendWeightsToRemoteInstanceReqInput,
     SendWeightsToRemoteInstanceReqOutput,
@@ -279,6 +280,7 @@ from sglang.srt.managers.scheduler_components.request_receiver import (
 from sglang.srt.managers.scheduler_components.weight_updater import (
     SchedulerWeightUpdaterManager,
 )
+from sglang.srt.managers.scheduler_components import schedule_policy_register
 from sglang.srt.managers.scheduler_components import schedule_policy_switch
 from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
 from sglang.srt.managers.scheduler_pp_mixin import SchedulerPPMixin
@@ -1283,6 +1285,8 @@ class Scheduler(
         # Set if a role switch tore down the old role but failed to rebuild
         # either the new or the old role; the instance can no longer serve.
         self._pd_role_switch_unhealthy = False
+        # Guards against concurrent/re-entrant Scheduling policy register.
+        self._schedule_policy_register_in_progress = False
         # Guards against concurrent/re-entrant Scheduling policy switched.
         self._schedule_policy_switch_in_progress = False
         # test schedule policy switch correntness
@@ -1290,6 +1294,7 @@ class Scheduler(
         self._pending_policy_switch_snapshot = None
         # Set by the ShutdownReq handler to break the event loop for graceful shutdown.
         self.gracefully_exit = False
+        self.custom_schedule_policy_registry = {}
         self.waiting_queue: List[Req] = []
         # The running decoding batch for continuous batching
         self.running_batch: ScheduleBatch = ScheduleBatch(reqs=[], batch_is_full=False)
@@ -1798,6 +1803,7 @@ class Scheduler(
                 ),
                 (SlowDownReqInput, self.slow_down),
                 (PdRoleSwitchReqInput, self.handle_pd_role_switch),
+                (SchedulePolicyRegisterReqInput, self.handle_schedule_policy_register),
                 (SchedulePolicySwitchReqInput, self.handle_schedule_policy_switch),
                 (
                     ProfileReq,
@@ -5852,6 +5858,9 @@ class Scheduler(
 
     def handle_pd_role_switch(self, recv_req: PdRoleSwitchReqInput):
         return role_switch.handle_pd_role_switch(self, recv_req)
+
+    def handle_schedule_policy_register(self, recv_req: SchedulePolicyRegisterReqInput):
+        return schedule_policy_register.handle_schedule_policy_register(self, recv_req)
 
     def handle_schedule_policy_switch(self, recv_req: SchedulePolicySwitchReqInput):
         return schedule_policy_switch.handle_schedule_policy_switch(self, recv_req)

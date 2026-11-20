@@ -144,6 +144,7 @@ from sglang.srt.managers.io_struct import (
     ProfileReq,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
+    SchedulePolicyRegisterReqInput,
     SchedulePolicySwitchReqInput,
     SendWeightsToRemoteInstanceReqInput,
     SeparateReasoningReqInput,
@@ -1591,6 +1592,7 @@ async def pd_role_switch(
         status_code=HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST,
     )
 
+
 @app.api_route("/schedule_policy_switch", methods=["POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def schedule_policy_switch(
@@ -1599,6 +1601,22 @@ async def schedule_policy_switch(
     """Switch this scheduler's schedule policy at runtime."""
     try:
         result = await _global_state.tokenizer_manager.schedule_policy_switch(obj, request)
+    except Exception as e:
+        return _create_error_response(e)
+    return ORJSONResponse(
+        msgspec_to_builtins(result),
+        status_code=HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST,
+    )
+
+
+@app.api_route("/schedule_policy_register", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def schedule_policy_register(
+    obj: Annotated[SchedulePolicyRegisterReqInput, Body()], request: Request
+):
+    """Register a custom schedule policy at runtime."""
+    try:
+        result = await _global_state.tokenizer_manager.schedule_policy_register(obj, request)
     except Exception as e:
         return _create_error_response(e)
     return ORJSONResponse(
