@@ -2198,6 +2198,8 @@ class SchedulePolicyRegisterReqInput(BaseReq, kw_only=True):
     func_name: str = ""
     # Path to the file containing the function 
     register_path: str = ""
+    # Optional function that creates per-request scheduling data
+    initialize_func_name: Optional[str] = None
 
 
 class SchedulePolicyRegisterReqOutput(BaseReq, kw_only=True):

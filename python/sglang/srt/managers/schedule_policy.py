@@ -35,10 +35,10 @@ import os
 import random
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import lru_cache
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Callable, Any
 
 import torch
 
@@ -221,9 +221,28 @@ def match_prefix_for_req(
 @dataclass(frozen=True)
 class PolicyEntry:
     name: str
-    rank: Callable
+    rank: Callable[..., None]
     parameters: tuple[str, ...]
+    initialize: Optional[Callable[[Req], Any]] = None
 
+    # Each policy owns its per-request data
+    request_data: dict[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+
+    def initialize_request(self, req: Req) -> None:
+        if self.initialize is None:
+            return
+
+        if req.rid in self.request_data:
+            return
+
+        self.request_data[req.rid] = self.initialize(req)
+
+    def release_request(self, req: Req) -> None:
+        self.request_data.pop(req.rid, None)
 
 class SchedulePolicy:
     def __init__(
@@ -265,7 +284,13 @@ class SchedulePolicy:
         self.register("random", self._sort_randomly)
 
 
-    def register(self, name, rank_fn):
+    def register(
+            self, 
+            name: str, 
+            rank_fn: Callable[..., None], 
+            *, 
+            initialize_fn: Optional[Callable[[Req], Any]] = None,
+        ) -> None:
         name = name.strip().lower()
 
         if not name:
@@ -277,6 +302,9 @@ class SchedulePolicy:
         if not callable(rank_fn):
             raise ValueError("rank_fn must be callable")
 
+        if initialize_fn is not None and not callable(initialize_fn):
+            raise ValueError("initialize_fn must be callable")
+
         signature = inspect.signature(rank_fn)
         parameters = []
 
@@ -287,6 +315,7 @@ class SchedulePolicy:
             name=name,
             rank=rank_fn,
             parameters=tuple(parameters),
+            initialize=initialize_fn,
         )
 
     def activate(self, name: str) -> None:

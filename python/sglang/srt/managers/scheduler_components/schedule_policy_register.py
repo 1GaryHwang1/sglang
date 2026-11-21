@@ -74,7 +74,39 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
                 f"{recv_req.func_name!r} is missing or is not callable"
             )
 
-        scheduler.policy.register(register_policy_name, rank_fn)
+        initialize_fn = None
+
+        if recv_req.initialize_func_name is not None:
+            initialize_fn = getattr(module, recv_req.initialize_func_name, None)
+            if not callable(initialize_fn):
+                raise ValueError(
+                        f"{recv_req.initialize_func_name!r} "
+                        "is missing or is not callable"
+                    )
+
+        scheduler.policy.register(
+            register_policy_name, 
+            rank_fn,
+            initialize_fn=initialize_fn,
+        )
+
+        entry = scheduler.policy.policy_registry[register_policy_name]
+
+        try:
+            if entry.initialize is not None:
+                live_reqs = set(scheduler.waiting_queue)
+                live_reqs.update(scheduler.collect_inflight_reqs())
+                live_reqs.update(scheduler.grammar_manager.grammar_queue)
+
+                if scheduler.chunked_req is not None:
+                    live_reqs.add(scheduler.chunked_req)
+
+                for req in live_reqs:
+                    if not req.finished():
+                        entry.initialize_request(req)
+        except Exception as e:
+            scheduler.policy.policy_registry.pop(register_policy_name)
+            raise
 
         logger.info("Registered custom schedule policy: %s", register_policy_name)
         return SchedulePolicyRegisterReqOutput(

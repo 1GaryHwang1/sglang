@@ -3288,10 +3288,30 @@ class Scheduler(
             if self._abort_on_queued_limit(req):
                 self._release_aborted_request(req)
                 return
-            self._prefetch_kvcache(req)
-            self.waiting_queue.append(req)
+
             req.time_stats.set_wait_queue_entry_time()
             req.arrival_processed_tokens = self.processed_tokens_counter
+
+            try:
+                for entry in self.policy.policy_registry.values():
+                    entry.initialize_request(req)
+            except Exception as e:
+                logger.exception(
+                    "Failed to initialize scheduling data: rid=%s",
+                    req.rid,
+                )
+
+                prepare_abort(
+                    req,
+                    f"Failed to initialize scheduling data: {e}",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                self.retire_unadmitted_request(req)
+                return
+
+            self._prefetch_kvcache(req)
+            self.waiting_queue.append(req)
+
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
@@ -3342,6 +3362,14 @@ class Scheduler(
     def _release_aborted_request(self, req: Req) -> None:
         """Drop the cache-side state an aborted request left behind."""
         self.tree_cache.finish(req.cache_request_handle, CacheRequestOutcome.ABORT)
+
+        # TODO: Support scheduling-data cleanup in PD mode.
+        # Distinguish terminal aborts from retry/requeue paths:
+        # retries must preserve data; terminal aborts must release it.
+
+        if self.disaggregation_mode == DisaggregationMode.NULL:
+            for entry in self.policy.policy_registry.values():
+                entry.release_request(req)
 
     def _abort_on_queued_limit(self, recv_req: Req) -> bool:
         """Abort an incoming or existing request if the waiting queue is full. Returns True if the incoming request is aborted."""
@@ -3892,6 +3920,7 @@ class Scheduler(
         available_parameters = {
             "running_batch": running_batch,
             "processed_tokens": self.processed_tokens_counter,
+            "request_data": self.policy.policy.request_data,
         }
 
         kwargs = {
@@ -4278,6 +4307,8 @@ class Scheduler(
                 # Member rows were freed inside retract_decode; the group only
                 # has to leave the live set.
                 self.beam_coordinator.retire_group(req)
+                for entry in self.policy.policy_registry.values():
+                    entry.release_request(req)
 
             msg_prefix = (
                 "KV cache pool is full. Retract requests. "
@@ -4840,6 +4871,11 @@ class Scheduler(
         self._maybe_clear_mm_inputs(batch)
         self.maybe_send_health_check_signal()
         self.metrics_reporter.update_device_timer()
+
+        for req in batch.reqs:
+            if req.finished():
+                for entry in self.policy.policy_registry.values():
+                    entry.release_request(req)
 
     def _record_step_counters(
         self, batch: ScheduleBatch, result: GenerationBatchResult
