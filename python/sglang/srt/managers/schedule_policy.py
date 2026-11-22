@@ -221,9 +221,17 @@ def match_prefix_for_req(
 @dataclass(frozen=True)
 class PolicyEntry:
     name: str
-    rank: Callable[..., None]
-    parameters: tuple[str, ...]
-    initialize: Optional[Callable[[Req], Any]] = None
+    rank_fn: Callable[..., None]
+    rank_fn_parameters: tuple[str, ...]
+    initialize_request_fn: Optional[Callable[..., Any]] = None
+    initialize_request_fn_parameters: tuple[str, ...] = ()
+
+    # Shared state owned by this policy
+    policy_data: Any = field(
+        default=None,
+        compare=False,
+        repr=False
+    )
 
     # Each policy owns its per-request data
     request_data: dict[str, Any] = field(
@@ -233,13 +241,20 @@ class PolicyEntry:
     )
 
     def initialize_request(self, req: Req) -> None:
-        if self.initialize is None:
+        if self.initialize_request_fn is None:
             return
 
         if req.rid in self.request_data:
             return
 
-        self.request_data[req.rid] = self.initialize(req)
+        available_parameters = {
+            "policy_data": self.policy_data,
+        }
+        kwargs = {
+            name: available_parameters[name]
+            for name in self.initialize_request_fn_parameters
+        }
+        self.request_data[req.rid] = self.initialize_request_fn(req, **kwargs)
 
     def release_request(self, req: Req) -> None:
         self.request_data.pop(req.rid, None)
@@ -289,7 +304,8 @@ class SchedulePolicy:
             name: str, 
             rank_fn: Callable[..., None], 
             *, 
-            initialize_fn: Optional[Callable[[Req], Any]] = None,
+            initialize_request_fn: Optional[Callable[..., Any]] = None,
+            initialize_policy_fn: Optional[Callable[[], Any]] = None,
         ) -> None:
         name = name.strip().lower()
 
@@ -302,27 +318,58 @@ class SchedulePolicy:
         if not callable(rank_fn):
             raise ValueError("rank_fn must be callable")
 
-        if initialize_fn is not None and not callable(initialize_fn):
-            raise ValueError("initialize_fn must be callable")
+        if initialize_request_fn is not None and not callable(initialize_request_fn):
+            raise ValueError("initialize_request_fn must be callable")
 
-        signature = inspect.signature(rank_fn)
-        parameters = []
+        if initialize_policy_fn is not None and not callable(initialize_policy_fn):
+            raise ValueError("initialize_policy_fn must be callable")
 
-        for parameter in signature.parameters.values():
-            parameters.append(parameter.name)
+        rank_fn_signature = inspect.signature(rank_fn)
+        rank_fn_parameters = []
+        for parameter in rank_fn_signature.parameters.values():
+            rank_fn_parameters.append(parameter.name)
+
+        initialize_request_fn_parameters = ()
+        if initialize_request_fn is not None:
+            signature = inspect.signature(initialize_request_fn)
+            initialize_request_fn_parameters = tuple(signature.parameters)[1:]
+
+            for parameter_name in initialize_request_fn_parameters:
+                if parameter_name != "policy_data":
+                    raise ValueError(
+                        f"Unsupported request initializer parameter: "
+                        f"{parameter_name!r}"
+                    )
+
+            # Validate the call shape without executing the initializer.
+            signature.bind(
+                None,
+                **{
+                    name: None
+                    for name in initialize_request_fn_parameters
+                },
+            )
+
+        policy_data = (
+            initialize_policy_fn()
+            if initialize_policy_fn is not None
+            else None
+        )
 
         self.policy_registry[name] = PolicyEntry(
             name=name,
-            rank=rank_fn,
-            parameters=tuple(parameters),
-            initialize=initialize_fn,
+            rank_fn=rank_fn,
+            rank_fn_parameters=tuple(rank_fn_parameters),
+            initialize_request_fn=initialize_request_fn,
+            initialize_request_fn_parameters=initialize_request_fn_parameters,
+            policy_data=policy_data,
         )
 
     def activate(self, name: str) -> None:
         self.policy = self._validate_and_adjust_policy(name, self.tree_cache)
 
     def calc_priority(self, waiting_queue: List[Req], *args, **kwargs):
-        return self.policy.rank(waiting_queue, *args, **kwargs)
+        return self.policy.rank_fn(waiting_queue, *args, **kwargs)
 
     def _determine_active_policy(self, waiting_queue: List[Req]) -> PolicyEntry:
         if self.policy.name in ("lpm", "hrrn") and len(waiting_queue) > 128:
@@ -472,7 +519,7 @@ class SchedulePolicy:
         """Prepare prefix matches and sort by the longest cached prefix."""
         if len(waiting_queue) > 128:
             # Turn off the expensive prefix matching and sorting when the #queue is large.
-            self.policy_registry["fcfs"].rank(waiting_queue)
+            self.policy_registry["fcfs"].rank_fn(waiting_queue)
             return
 
         temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
@@ -510,7 +557,7 @@ class SchedulePolicy:
         """
         if len(waiting_queue) > 128:
             # Skip the expensive matching pass for large waiting queues.
-            self.policy_registry["fcfs"].rank(waiting_queue)
+            self.policy_registry["fcfs"].rank_fn(waiting_queue)
             return
 
         temporary_deprioritized = self._compute_prefix_matches(waiting_queue)

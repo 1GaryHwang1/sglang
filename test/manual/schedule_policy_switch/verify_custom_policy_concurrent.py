@@ -211,7 +211,7 @@ class ConcurrentVerifier:
             "/schedule_policy_register",
             json={
                 "policy_name": policy_name,
-                "func_name": function,
+                "rank_fn_name": function,
                 "register_path": self.args.server_policy_file,
             },
         )
@@ -223,7 +223,7 @@ class ConcurrentVerifier:
         record = {
             **result,
             "policy_name": policy_name,
-            "func_name": function,
+            "rank_fn_name": function,
             "parameters": list(inspect.signature(globals()[function]).parameters),
             "action_index": action_index,
             "current_policy": current_policy,

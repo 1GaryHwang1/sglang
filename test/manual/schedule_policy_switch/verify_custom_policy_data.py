@@ -101,8 +101,8 @@ class CustomPolicyDataVerifier:
             json={
                 "policy_name": POLICY_NAME,
                 "register_path": self.client.server_policy_file,
-                "func_name": "rank_by_request_data",
-                "initialize_func_name": "initialize_request_data",
+                "rank_fn_name": "rank_by_request_data",
+                "initialize_request_fn_name": "initialize_request_data",
             },
         )
         assert result["success"], result

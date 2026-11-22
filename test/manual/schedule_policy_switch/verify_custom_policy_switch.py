@@ -196,7 +196,7 @@ class CustomPolicySwitchVerifier:
                 "/schedule_policy_register",
                 json={
                     "policy_name": self.policy_name,
-                    "func_name": "rank_shortest_output_first",
+                    "rank_fn_name": "rank_shortest_output_first",
                     "register_path": self.server_policy_file,
                 },
             )

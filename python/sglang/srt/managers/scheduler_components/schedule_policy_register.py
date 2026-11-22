@@ -68,32 +68,45 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
 
-        rank_fn = getattr(module, recv_req.func_name, None)
+        rank_fn = getattr(module, recv_req.rank_fn_name, None)
         if not callable(rank_fn):
             raise ValueError(
-                f"{recv_req.func_name!r} is missing or is not callable"
+                f"{recv_req.rank_fn_name!r} is missing or is not callable"
             )
 
-        initialize_fn = None
-
-        if recv_req.initialize_func_name is not None:
-            initialize_fn = getattr(module, recv_req.initialize_func_name, None)
-            if not callable(initialize_fn):
+        initialize_request_fn = None
+        if recv_req.initialize_request_fn_name is not None:
+            initialize_request_fn = getattr(module, recv_req.initialize_request_fn_name, None)
+            if not callable(initialize_request_fn):
                 raise ValueError(
-                        f"{recv_req.initialize_func_name!r} "
-                        "is missing or is not callable"
-                    )
+                    f"{recv_req.initialize_request_fn_name!r} "
+                    "is missing or is not callable"
+                )
+
+        initialize_policy_fn = None
+        if recv_req.initialize_policy_fn_name is not None:
+            initialize_policy_fn = getattr(
+                module,
+                recv_req.initialize_policy_fn_name,
+                None,
+            )
+            if not callable(initialize_policy_fn):
+                raise ValueError(
+                    f"{recv_req.initialize_policy_fn_name!r} "
+                    "is missing or is not callable"
+                )
 
         scheduler.policy.register(
             register_policy_name, 
             rank_fn,
-            initialize_fn=initialize_fn,
+            initialize_request_fn=initialize_request_fn,
+            initialize_policy_fn=initialize_policy_fn,
         )
 
         entry = scheduler.policy.policy_registry[register_policy_name]
 
         try:
-            if entry.initialize is not None:
+            if entry.initialize_request_fn is not None:
                 live_reqs = set(scheduler.waiting_queue)
                 live_reqs.update(scheduler.collect_inflight_reqs())
                 live_reqs.update(scheduler.grammar_manager.grammar_queue)

@@ -2192,14 +2192,16 @@ class SchedulePolicySwitchReqOutput(BaseReq, kw_only=True):
 
 
 class SchedulePolicyRegisterReqInput(BaseReq, kw_only=True):
+    # Path to the file containing the function 
+    register_path: str = ""
     # Schedule policy name, used when switching
     policy_name: str = ""
     # The name of the function to load from the file
-    func_name: str = ""
-    # Path to the file containing the function 
-    register_path: str = ""
+    rank_fn_name: str = ""
     # Optional function that creates per-request scheduling data
-    initialize_func_name: Optional[str] = None
+    initialize_request_fn_name: Optional[str] = None
+    # Optional function that creates shared policy data.
+    initialize_policy_fn_name: Optional[str] = None
 
 
 class SchedulePolicyRegisterReqOutput(BaseReq, kw_only=True):

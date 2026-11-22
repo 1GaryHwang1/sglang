@@ -3921,11 +3921,12 @@ class Scheduler(
             "running_batch": running_batch,
             "processed_tokens": self.processed_tokens_counter,
             "request_data": self.policy.policy.request_data,
+            "policy_data": self.policy.policy.policy_data,
         }
 
         kwargs = {
             name: available_parameters[name]
-            for name in self.policy.policy.parameters
+            for name in self.policy.policy.rank_fn_parameters
             if name != "waiting_queue"
         }
 
