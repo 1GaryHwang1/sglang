@@ -6,6 +6,10 @@ from array import array
 
 from sglang.srt.environ import envs
 from sglang.srt.managers.prefill_delayer import PrefillDelayerSinglePassExecutor
+from sglang.srt.managers.scheduler_components.schedule_events import (
+    SchedulingEvent,
+    EventHandler,
+)
 from sglang.srt.runtime_context import (
     get_disagg,
     get_exec,
@@ -37,7 +41,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Callable, Any
 
 import torch
@@ -278,6 +282,9 @@ class SchedulePolicy:
         # It is used to find the matching prefix for in-batch prefix caching.
         self.waiting_queue_radix_tree = RadixCache.create_simulated()
         self.policy_registry: dict[str, PolicyEntry] = {}
+        self.event_handlers: dict[SchedulingEvent, dict[str, EventHandler]] = {
+            event: {} for event in SchedulingEvent
+        }
 
         self.init_builtin_schedule_policy()
         self.policy = self._validate_and_adjust_policy(policy, tree_cache)
@@ -306,6 +313,9 @@ class SchedulePolicy:
             *, 
             initialize_request_fn: Optional[Callable[..., Any]] = None,
             initialize_policy_fn: Optional[Callable[[], Any]] = None,
+            hooks: Optional[
+                dict[SchedulingEvent, Callable[..., None]]
+            ] = None
         ) -> None:
         name = name.strip().lower()
 
@@ -356,7 +366,7 @@ class SchedulePolicy:
             else None
         )
 
-        self.policy_registry[name] = PolicyEntry(
+        entry = PolicyEntry(
             name=name,
             rank_fn=rank_fn,
             rank_fn_parameters=tuple(rank_fn_parameters),
@@ -365,8 +375,59 @@ class SchedulePolicy:
             policy_data=policy_data,
         )
 
+        bound_handlers: dict[SchedulingEvent, EventHandler] = {}
+
+        for event, fn in(hooks or {}).items():
+            if not isinstance(event, SchedulingEvent):
+                raise ValueError(f"Unknown scheduling event: {event!r}")
+
+            if not callable(fn):
+                raise ValueError(f"Handler for {event.value!r} must be callable")
+
+            bound_handlers[event] = self._bind_event_handler(entry, fn)
+
+        self.policy_registry[name] = entry
+
+        for event, handler in bound_handlers.items():
+            self.event_handlers[event][name] = handler
+
     def activate(self, name: str) -> None:
         self.policy = self._validate_and_adjust_policy(name, self.tree_cache)
+
+    @staticmethod
+    def _bind_event_handler(
+        entry: PolicyEntry,
+        fn: Callable[..., None],
+    ) -> EventHandler:
+
+        signature = inspect.signature(fn)
+        parameters = signature.parameters
+
+        kwargs = {}
+        if "request_data" in parameters:
+            kwargs["request_data"] = entry.request_data
+        if "policy_data" in parameters:
+            kwargs["policy_data"] = entry.policy_data
+
+        bound_fn = partial(fn, **kwargs)
+
+        if "req" in parameters:
+            signature.bind(req=None, **kwargs)
+
+            def handler(req: Req) -> None:
+                bound_fn(req=req)
+
+        else:
+            signature.bind(**kwargs)
+
+            def handler(req: Req) -> None:
+                bound_fn()
+
+        return handler
+
+    def trigger_event(self, event: SchedulingEvent, req: Req) -> None:
+        for handler in self.event_handlers[event].values():
+            handler(req)
 
     def calc_priority(self, waiting_queue: List[Req], *args, **kwargs):
         return self.policy.rank_fn(waiting_queue, *args, **kwargs)

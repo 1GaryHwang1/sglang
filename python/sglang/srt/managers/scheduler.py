@@ -282,6 +282,9 @@ from sglang.srt.managers.scheduler_components.weight_updater import (
 )
 from sglang.srt.managers.scheduler_components import schedule_policy_register
 from sglang.srt.managers.scheduler_components import schedule_policy_switch
+from sglang.srt.managers.scheduler_components.schedule_events import (
+    SchedulingEvent,
+)
 from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
 from sglang.srt.managers.scheduler_pp_mixin import SchedulerPPMixin
 from sglang.srt.managers.utils import (
@@ -2887,7 +2890,8 @@ class Scheduler(
                 req.time_stats.set_metrics_collector(self.metrics_collector)
             if isinstance(req.finished_reason, FINISH_ABORT):
                 self.init_req_max_new_tokens(req)
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
         else:
@@ -2909,7 +2913,8 @@ class Scheduler(
             req.tokenizer = self.tokenizer
             req.set_finish_with_abort(error_msg)
             self.init_req_max_new_tokens(req)
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         if recv_req.pp_prefetch_ticketed is True:
@@ -2923,7 +2928,8 @@ class Scheduler(
                 err_type="InternalServerError",
             )
             self.init_req_max_new_tokens(req)
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         if error_msg := self.validate_dllm_request(req):
@@ -2944,7 +2950,8 @@ class Scheduler(
             if error_msg is not None:
                 req.set_finish_with_abort(error_msg)
                 self.init_req_max_new_tokens(req)
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
         if self.spec_algorithm.is_uno():
@@ -2952,7 +2959,8 @@ class Scheduler(
             if error_msg is not None:
                 req.set_finish_with_abort(error_msg)
                 self.init_req_max_new_tokens(req)
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
         if req.return_sampling_mask:
@@ -3010,7 +3018,8 @@ class Scheduler(
                     err_type="InternalServerError",
                 )
                 self.init_req_max_new_tokens(req)
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
             SessionController.adjust_mm_offsets(recv_req, req, image_inputs)
@@ -3036,7 +3045,8 @@ class Scheduler(
                     )
                 )
                 self.init_req_max_new_tokens(req)
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
         # initialize before returning
@@ -3050,7 +3060,8 @@ class Scheduler(
         )
         if error_msg:
             req.set_finish_with_abort(error_msg)
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         if not recv_req.return_logprob and recv_req.logprob_start_len != -1:
@@ -3076,7 +3087,8 @@ class Scheduler(
             error_msg = f"{req.logprob_start_len=} is higher than the number of input tokens {len(req.origin_input_ids)=}. Please use a smaller logprob_start_len."
             req.logprob_start_len = -1
             req.set_finish_with_abort(error_msg)
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         if (
@@ -3094,7 +3106,8 @@ class Scheduler(
             )
             req.logprob_start_len = -1
             req.set_finish_with_abort(error_msg)
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         if recv_req.return_routed_experts:
@@ -3115,7 +3128,8 @@ class Scheduler(
             if error_msg is not None:
                 req.routed_experts_start_len = 0
                 req.set_finish_with_abort(error_msg)
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
         if get_parallel().pp_rank == 0 and getattr(
@@ -3126,7 +3140,8 @@ class Scheduler(
 
         added_to_grammar_queue = self.grammar_manager.process_req_with_grammar(req)
         if not added_to_grammar_queue:
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
 
     def handle_batch_generate_request(
         self,
@@ -3276,10 +3291,10 @@ class Scheduler(
         req.update_finish_state()
         self.output_streamer.stream_output([req], req.return_logprob)
 
-    def _add_request_to_queue(self, req: Req, is_retracted: bool = False):
+    def _add_request_to_queue(self, req: Req, is_retracted: bool = False) -> bool:
         if not self._set_or_validate_priority(req):
             self._release_aborted_request(req)
-            return
+            return False
         if is_retracted:
             req.storage_prefetch_retry_attempts = 0
             req.storage_prefetch_last_match_len = None
@@ -3287,30 +3302,14 @@ class Scheduler(
         if self.disaggregation_mode == DisaggregationMode.NULL:
             if self._abort_on_queued_limit(req):
                 self._release_aborted_request(req)
-                return
+                return False
 
             req.time_stats.set_wait_queue_entry_time()
             req.arrival_processed_tokens = self.processed_tokens_counter
 
-            try:
-                for entry in self.policy.policy_registry.values():
-                    entry.initialize_request(req)
-            except Exception as e:
-                logger.exception(
-                    "Failed to initialize scheduling data: rid=%s",
-                    req.rid,
-                )
-
-                prepare_abort(
-                    req,
-                    f"Failed to initialize scheduling data: {e}",
-                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
-                self.retire_unadmitted_request(req)
-                return
-
             self._prefetch_kvcache(req)
             self.waiting_queue.append(req)
+            return True
 
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
@@ -3326,6 +3325,8 @@ class Scheduler(
                 req.time_stats.set_retract_time()
         else:
             raise ValueError(f"Invalid {self.disaggregation_mode=}")
+
+        return False
 
     def _reject_sampling_mask_request(self, req: Req, error_msg: str) -> None:
         """Return a sampling-mask validation error without running the model."""
@@ -3368,6 +3369,13 @@ class Scheduler(
         # retries must preserve data; terminal aborts must release it.
 
         if self.disaggregation_mode == DisaggregationMode.NULL:
+            # Intake rejections have not entered the scheduling lifecycle.
+            if req.time_stats.wait_queue_entry_time > 0:
+                if not req.finished():
+                    req.to_finish = req.to_finish or FINISH_ABORT()
+                    req.update_finish_state(0)
+                self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+
             for entry in self.policy.policy_registry.values():
                 entry.release_request(req)
 
@@ -3502,7 +3510,8 @@ class Scheduler(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 err_type="InternalServerError",
             )
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         # Handle multimodal inputs
@@ -3515,7 +3524,8 @@ class Scheduler(
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                     err_type="InternalServerError",
                 )
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             # The `pad_input_ids_func` is model-specific and may be None for
@@ -3539,7 +3549,8 @@ class Scheduler(
                         f"After expanding {len(req.origin_input_ids_unpadded)=} => {len(req.origin_input_ids)} >= {self.max_req_input_len}."
                     )
                 )
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
                 return
 
         # Validate prompts length
@@ -3549,12 +3560,14 @@ class Scheduler(
             get_serving().allow_auto_truncate,
         )
         if error_msg:
-            self._add_request_to_queue(req)
+            if self._add_request_to_queue(req):
+                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
             return
 
         # Copy more attributes
         req.logprob_start_len = -1
-        self._add_request_to_queue(req)
+        if self._add_request_to_queue(req):
+            self.policy.trigger_event(SchedulingEvent.ENABLE, req)
 
     def handle_batch_embedding_request(
         self,
@@ -3820,6 +3833,9 @@ class Scheduler(
             if self.enable_fpm:
                 ret.fpm_start_time = self._fpm_batch_t0
 
+            for req in ret.reqs:
+                self.policy.trigger_event(SchedulingEvent.ON_BATCH, req)
+
         return NextBatchPlan(batch_to_run=ret, running_batch=running_batch)
 
     def get_num_allocatable_reqs(
@@ -3878,7 +3894,8 @@ class Scheduler(
         if self.grammar_manager.has_waiting_grammars():
             ready_grammar_requests = self.grammar_manager.get_ready_grammar_requests()
             for req in ready_grammar_requests:
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
 
         if self.enable_priority_preemption or self.is_hybrid_swa:
             # Reset batch_is_full to try preemption with a prefill adder.
@@ -3915,6 +3932,9 @@ class Scheduler(
         ):
             running_batch.batch_is_full = True
             return None, running_batch
+
+        for req in self.waiting_queue:
+            self.policy.trigger_event(SchedulingEvent.ON_SORT, req)
 
         # Get priority queue
         available_parameters = {
@@ -4134,7 +4154,8 @@ class Scheduler(
         self.waiting_queue = [x for x in self.waiting_queue if x not in can_run_set]
         if adder.preempt_list:
             for req in adder.preempt_list:
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req)
 
         if adder.new_chunked_req is not None:
             # Update chunked prefill
@@ -4308,6 +4329,8 @@ class Scheduler(
                 # Member rows were freed inside retract_decode; the group only
                 # has to leave the live set.
                 self.beam_coordinator.retire_group(req)
+                req.update_finish_state(0)
+                self.policy.trigger_event(SchedulingEvent.DISABLE, req)
                 for entry in self.policy.policy_registry.values():
                     entry.release_request(req)
 
@@ -4326,7 +4349,8 @@ class Scheduler(
             logger.warning(msg_prefix + msg_details)
 
             for req in retracted_reqs:
-                self._add_request_to_queue(req, is_retracted=True)
+                if self._add_request_to_queue(req, is_retracted=True):
+                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req)
         else:
             self.new_token_ratio_tracker.decay_step()
 
@@ -4651,6 +4675,10 @@ class Scheduler(
                     else {}
                 )
                 resolve_forward_inputs(batch, self.future_map)
+
+                for req in batch.reqs:
+                    self.policy.trigger_event(SchedulingEvent.ON_COMPUTE, req)
+
                 batch_result = self.model_worker.forward_batch_generation(
                     batch, **kwargs
                 )
@@ -4874,7 +4902,11 @@ class Scheduler(
         self.metrics_reporter.update_device_timer()
 
         for req in batch.reqs:
+            self.policy.trigger_event(SchedulingEvent.ON_STOP, req)
+
             if req.finished():
+                self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+
                 for entry in self.policy.policy_registry.values():
                     entry.release_request(req)
 

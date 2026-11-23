@@ -1,21 +1,19 @@
 """Runtime schedule policy register."""
 
-
 from __future__ import annotations
 
 import importlib.util
-import inspect
+import logging
 import sys
 from pathlib import Path
-import json
-import os
-
-import logging
 from typing import TYPE_CHECKING
 
 from sglang.srt.managers.io_struct import (
-    SchedulePolicyRegisterReqInput, 
+    SchedulePolicyRegisterReqInput,
     SchedulePolicyRegisterReqOutput,
+)
+from sglang.srt.managers.scheduler_components.schedule_events import (
+    SchedulingEvent,
 )
 
 if TYPE_CHECKING:
@@ -23,7 +21,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePolicyRegisterReqInput
+
+def handle_schedule_policy_register(
+    scheduler: Scheduler, recv_req: SchedulePolicyRegisterReqInput
 ) -> SchedulePolicyRegisterReqOutput:
     """Register the scheduler's policy at runtime. The instance do not need to be
     idle."""
@@ -37,7 +37,7 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
         return SchedulePolicyRegisterReqOutput(
             success=False,
             message=msg,
-            new_register_schedule_policy=register_policy_name
+            new_register_schedule_policy=register_policy_name,
         )
 
     if scheduler._schedule_policy_register_in_progress:
@@ -70,37 +70,22 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
 
         rank_fn = getattr(module, recv_req.rank_fn_name, None)
         if not callable(rank_fn):
-            raise ValueError(
-                f"{recv_req.rank_fn_name!r} is missing or is not callable"
-            )
+            raise ValueError(f"{recv_req.rank_fn_name!r} is missing or is not callable")
 
-        initialize_request_fn = None
-        if recv_req.initialize_request_fn_name is not None:
-            initialize_request_fn = getattr(module, recv_req.initialize_request_fn_name, None)
-            if not callable(initialize_request_fn):
-                raise ValueError(
-                    f"{recv_req.initialize_request_fn_name!r} "
-                    "is missing or is not callable"
-                )
-
-        initialize_policy_fn = None
-        if recv_req.initialize_policy_fn_name is not None:
-            initialize_policy_fn = getattr(
-                module,
-                recv_req.initialize_policy_fn_name,
-                None,
-            )
-            if not callable(initialize_policy_fn):
-                raise ValueError(
-                    f"{recv_req.initialize_policy_fn_name!r} "
-                    "is missing or is not callable"
-                )
+        initialize_request_fn = getattr(module, "initialize_request", None)
+        initialize_policy_fn = getattr(module, "initialize_policy", None)
+        hooks = {
+            event: getattr(module, event.value)
+            for event in SchedulingEvent
+            if hasattr(module, event.value)
+        }
 
         scheduler.policy.register(
-            register_policy_name, 
+            register_policy_name,
             rank_fn,
             initialize_request_fn=initialize_request_fn,
             initialize_policy_fn=initialize_policy_fn,
+            hooks=hooks,
         )
 
         entry = scheduler.policy.policy_registry[register_policy_name]
@@ -117,8 +102,11 @@ def handle_schedule_policy_register(scheduler: Scheduler, recv_req: SchedulePoli
                 for req in live_reqs:
                     if not req.finished():
                         entry.initialize_request(req)
-        except Exception as e:
+        except Exception:
             scheduler.policy.policy_registry.pop(register_policy_name)
+
+            for handlers in scheduler.policy.event_handlers.values():
+                handlers.pop(register_policy_name, None)
             raise
 
         logger.info("Registered custom schedule policy: %s", register_policy_name)
