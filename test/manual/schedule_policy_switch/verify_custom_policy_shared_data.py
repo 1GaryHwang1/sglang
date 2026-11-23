@@ -6,7 +6,8 @@ Start a fresh server with start_custom_policy_switch_server.sh, then run:
 Run in the server's container so the client can read the snapshots in /tmp.
 For separate filesystems, share the server's snapshot file and pass its client
 path with --snapshot-file, plus the server's script path with --server-policy-file.
-The server imports the policy functions from this file. Fixed policy names
+The server imports this file and shared_data_longest_policy.py beside it.
+Both export fixed initializer and hook names. Fixed policy names
 require a fresh server for each run. Short prompts avoid chunking/retraction;
 PD-specific queues and sharing across Scheduler processes are not covered.
 """
@@ -62,12 +63,8 @@ def _initialize_policy(label: str, output_sign: int) -> PolicyData:
     return _created_data
 
 
-def initialize_shortest_policy() -> PolicyData:
+def initialize_policy() -> PolicyData:
     return _initialize_policy("shortest", 1)
-
-
-def initialize_longest_policy() -> PolicyData:
-    return _initialize_policy("longest", -1)
 
 
 def initialize_request(req: Req, policy_data: PolicyData) -> RequestData:
@@ -81,6 +78,15 @@ def initialize_request(req: Req, policy_data: PolicyData) -> RequestData:
 def initialize_request_keyword(req: Req, *, policy_data: PolicyData) -> RequestData:
     """Exercise keyword-only shared-data injection as well."""
     return initialize_request(req, policy_data)
+
+
+def enable(
+    req: Req,
+    request_data: dict[str, RequestData],
+    policy_data: PolicyData,
+) -> None:
+    if req.rid not in request_data:
+        request_data[req.rid] = initialize_request(req, policy_data)
 
 
 def _record_snapshot(
@@ -331,18 +337,20 @@ class SharedPolicyDataVerifier:
                 futures[waiting_id] = executor.submit(client.generate, waiting_id, 16)
                 client.wait_for_load(1, 1, blocker)
 
-                for name, rank, request_init, policy_init in (
+                for name, rank, policy_file in (
                     (
                         SHORTEST_POLICY,
                         "rank_shortest",
-                        "initialize_request",
-                        "initialize_shortest_policy",
+                        client.server_policy_file,
                     ),
                     (
                         LONGEST_POLICY,
                         "rank_longest",
-                        "initialize_request_keyword",
-                        "initialize_longest_policy",
+                        str(
+                            Path(client.server_policy_file).with_name(
+                                "shared_data_longest_policy.py"
+                            )
+                        ),
                     ),
                 ):
                     client.check_blocker(blocker)
@@ -351,10 +359,8 @@ class SharedPolicyDataVerifier:
                         "/schedule_policy_register",
                         json={
                             "policy_name": name,
-                            "register_path": client.server_policy_file,
+                            "register_path": policy_file,
                             "rank_fn_name": rank,
-                            "initialize_request_fn_name": request_init,
-                            "initialize_policy_fn_name": policy_init,
                         },
                     )
                     assert result["success"], result

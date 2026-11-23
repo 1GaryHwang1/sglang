@@ -37,7 +37,7 @@ class RequestData:
     enqueue_time: float
 
 
-def initialize_request_data(req: Req) -> RequestData:
+def initialize_request(req: Req) -> RequestData:
     enqueue_time = req.time_stats.wait_queue_entry_time
     assert math.isfinite(enqueue_time) and enqueue_time > 0, (
         f"{req.rid}: 初始化前尚未记录入队时间"
@@ -47,6 +47,11 @@ def initialize_request_data(req: Req) -> RequestData:
         output_budget=req.sampling_params.max_new_tokens,
         enqueue_time=enqueue_time,
     )
+
+
+def enable(req: Req, request_data: dict[str, RequestData]) -> None:
+    if req.rid not in request_data:
+        request_data[req.rid] = initialize_request(req)
 
 
 def rank_by_request_data(
@@ -102,7 +107,6 @@ class CustomPolicyDataVerifier:
                 "policy_name": POLICY_NAME,
                 "register_path": self.client.server_policy_file,
                 "rank_fn_name": "rank_by_request_data",
-                "initialize_request_fn_name": "initialize_request_data",
             },
         )
         assert result["success"], result
