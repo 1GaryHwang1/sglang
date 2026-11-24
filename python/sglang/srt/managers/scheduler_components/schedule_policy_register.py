@@ -104,9 +104,6 @@ def handle_schedule_policy_register(
                         entry.initialize_request(req)
         except Exception:
             scheduler.policy.policy_registry.pop(register_policy_name)
-
-            for handlers in scheduler.policy.event_handlers.values():
-                handlers.pop(register_policy_name, None)
             raise
 
         logger.info("Registered custom schedule policy: %s", register_policy_name)

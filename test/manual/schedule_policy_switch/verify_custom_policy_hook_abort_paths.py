@@ -30,7 +30,6 @@ def make_scheduler():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.policy = SchedulePolicy.__new__(SchedulePolicy)
     scheduler.policy.policy_registry = {}
-    scheduler.policy.event_handlers = {event: {} for event in SchedulingEvent}
     for name in hooks.POLICIES:
         scheduler.policy.register(
             name,

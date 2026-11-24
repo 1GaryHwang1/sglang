@@ -230,6 +230,12 @@ class PolicyEntry:
     initialize_request_fn: Optional[Callable[..., Any]] = None
     initialize_request_fn_parameters: tuple[str, ...] = ()
 
+    event_handlers: dict[SchedulingEvent, EventHandler] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+
     # Shared state owned by this policy
     policy_data: Any = field(
         default=None,
@@ -243,6 +249,9 @@ class PolicyEntry:
         compare=False,
         repr=False,
     )
+
+    def rank(self, waiting_queue: List[Req], *args, **kwargs) -> None:
+        self.rank_fn(waiting_queue, *args, **kwargs)
 
     def initialize_request(self, req: Req) -> None:
         if self.initialize_request_fn is None:
@@ -263,6 +272,11 @@ class PolicyEntry:
     def release_request(self, req: Req) -> None:
         self.request_data.pop(req.rid, None)
 
+    def trigger_event(self, event: SchedulingEvent, req: Req) -> None:
+        handler = self.event_handlers.get(event)
+        if handler is not None:
+            handler(req)
+
 class SchedulePolicy:
     def __init__(
         self,
@@ -282,9 +296,6 @@ class SchedulePolicy:
         # It is used to find the matching prefix for in-batch prefix caching.
         self.waiting_queue_radix_tree = RadixCache.create_simulated()
         self.policy_registry: dict[str, PolicyEntry] = {}
-        self.event_handlers: dict[SchedulingEvent, dict[str, EventHandler]] = {
-            event: {} for event in SchedulingEvent
-        }
 
         self.init_builtin_schedule_policy()
         self.policy = self._validate_and_adjust_policy(policy, tree_cache)
@@ -375,8 +386,6 @@ class SchedulePolicy:
             policy_data=policy_data,
         )
 
-        bound_handlers: dict[SchedulingEvent, EventHandler] = {}
-
         for event, fn in(hooks or {}).items():
             if not isinstance(event, SchedulingEvent):
                 raise ValueError(f"Unknown scheduling event: {event!r}")
@@ -384,12 +393,9 @@ class SchedulePolicy:
             if not callable(fn):
                 raise ValueError(f"Handler for {event.value!r} must be callable")
 
-            bound_handlers[event] = self._bind_event_handler(entry, fn)
+            entry.event_handlers[event] = self._bind_event_handler(entry, fn)
 
         self.policy_registry[name] = entry
-
-        for event, handler in bound_handlers.items():
-            self.event_handlers[event][name] = handler
 
     def activate(self, name: str) -> None:
         self.policy = self._validate_and_adjust_policy(name, self.tree_cache)
@@ -426,11 +432,11 @@ class SchedulePolicy:
         return handler
 
     def trigger_event(self, event: SchedulingEvent, req: Req) -> None:
-        for handler in self.event_handlers[event].values():
-            handler(req)
+        for entry in self.policy_registry.values():
+            entry.trigger_event(event, req)
 
-    def calc_priority(self, waiting_queue: List[Req], *args, **kwargs):
-        return self.policy.rank_fn(waiting_queue, *args, **kwargs)
+    def calc_priority(self, waiting_queue: List[Req], *args, **kwargs) -> None:
+        self.policy.rank(waiting_queue, *args, **kwargs)
 
     def _determine_active_policy(self, waiting_queue: List[Req]) -> PolicyEntry:
         if self.policy.name in ("lpm", "hrrn") and len(waiting_queue) > 128:
