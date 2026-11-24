@@ -2207,6 +2207,16 @@ class SchedulePolicyRegisterReqOutput(BaseReq, kw_only=True):
     new_register_schedule_policy: str = ""
 
 
+class SchedulePolicyUnregisterReqInput(BaseReq, kw_only=True):
+    policy_name: str = ""
+
+
+class SchedulePolicyUnregisterReqOutput(BaseReq, kw_only=True):
+    success: bool = False
+    message: str = ""
+    unregister_schedule_policy: str = ""
+
+
 class AbortReq(BaseReq, kw_only=True):
     # Whether to abort all requests
     abort_all: bool = False

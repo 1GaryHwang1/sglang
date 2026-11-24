@@ -172,6 +172,7 @@ from sglang.srt.managers.io_struct import (
     ScaleElasticEPReqInput,
     ScaleElasticEPReqOutput,
     SchedulePolicyRegisterReqInput,
+    SchedulePolicyUnregisterReqInput,
     SchedulePolicySwitchReqInput,
     SendWeightsToRemoteInstanceReqInput,
     SendWeightsToRemoteInstanceReqOutput,
@@ -281,6 +282,7 @@ from sglang.srt.managers.scheduler_components.weight_updater import (
     SchedulerWeightUpdaterManager,
 )
 from sglang.srt.managers.scheduler_components import schedule_policy_register
+from sglang.srt.managers.scheduler_components import schedule_policy_unregister
 from sglang.srt.managers.scheduler_components import schedule_policy_switch
 from sglang.srt.managers.scheduler_components.schedule_events import (
     SchedulingEvent,
@@ -1805,8 +1807,18 @@ class Scheduler(
                 ),
                 (SlowDownReqInput, self.slow_down),
                 (PdRoleSwitchReqInput, self.handle_pd_role_switch),
-                (SchedulePolicyRegisterReqInput, self.handle_schedule_policy_register),
-                (SchedulePolicySwitchReqInput, self.handle_schedule_policy_switch),
+                (
+                    SchedulePolicyRegisterReqInput,
+                    self.handle_schedule_policy_register
+                ),
+                (
+                    SchedulePolicyUnregisterReqInput,
+                    self.handle_schedule_policy_unregister
+                ),
+                (
+                    SchedulePolicySwitchReqInput,
+                    self.handle_schedule_policy_switch
+                ),
                 (
                     ProfileReq,
                     lambda req: self.profiler_manager._profile(req),
@@ -5936,6 +5948,9 @@ class Scheduler(
 
     def handle_schedule_policy_register(self, recv_req: SchedulePolicyRegisterReqInput):
         return schedule_policy_register.handle_schedule_policy_register(self, recv_req)
+
+    def handle_schedule_policy_unregister(self, recv_req: SchedulePolicyUnregisterReqInput):
+        return schedule_policy_unregister.handle_schedule_policy_unregister(self, recv_req)
 
     def handle_schedule_policy_switch(self, recv_req: SchedulePolicySwitchReqInput):
         return schedule_policy_switch.handle_schedule_policy_switch(self, recv_req)

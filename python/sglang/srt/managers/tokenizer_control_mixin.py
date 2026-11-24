@@ -67,6 +67,8 @@ from sglang.srt.managers.io_struct import (
     ScaleElasticEPReqOutput,
     SchedulePolicyRegisterReqInput,
     SchedulePolicyRegisterReqOutput,
+    SchedulePolicyUnregisterReqInput,
+    SchedulePolicyUnregisterReqOutput,
     SchedulePolicySwitchReqInput,
     SchedulePolicySwitchReqOutput,
     SendWeightsToRemoteInstanceReqInput,
@@ -129,6 +131,7 @@ _COMMUNICATOR_SPECS = [
     ("slow_down", SlowDownReqOutput),
     ("pd_role_switch", PdRoleSwitchReqOutput),
     ("schedule_policy_register", SchedulePolicyRegisterReqOutput),
+    ("schedule_policy_unregister", SchedulePolicyUnregisterReqOutput),
     ("schedule_policy_switch", SchedulePolicySwitchReqOutput),
     ("flush_cache", FlushCacheReqOutput),
     ("add_external_corpus", AddExternalCorpusReqOutput),
@@ -994,6 +997,24 @@ class TokenizerControlMixin:
             success=all_success,
             message=msg,
             new_register_schedule_policy=results[0].new_register_schedule_policy if results else "",
+        )
+
+    async def schedule_policy_unregister(
+        self: TokenizerManager,
+        obj: SchedulePolicyUnregisterReqInput,
+        request: Optional[fastapi.Request] = None,
+    ) -> SchedulePolicyUnregisterReqOutput:
+        self.auto_create_handle_loop()
+        results = await self.schedule_policy_unregister_communicator(obj)
+        all_success = bool(results) and all(r.success for r in results)
+        if all_success:
+            msg = "ok"
+        else:
+            msg = "; ".join(r.message for r in results if not r.success)
+        return SchedulePolicyUnregisterReqOutput(
+            success=all_success,
+            message=msg,
+            unregister_schedule_policy=results[0].unregister_schedule_policy if results else "",
         )
 
     async def get_internal_state(self: TokenizerManager) -> List[Dict[Any, Any]]:

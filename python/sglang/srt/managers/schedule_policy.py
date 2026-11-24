@@ -397,6 +397,23 @@ class SchedulePolicy:
 
         self.policy_registry[name] = entry
 
+    def unregister(self, name: str) -> None:
+        name = name.strip().lower()
+
+        entry = self.policy_registry.get(name)
+        if entry is None:
+            raise ValueError(f"Unknown policy: {name}")
+
+        if name == self.policy.name:
+            raise ValueError("Switch to another policy before unregistering")
+
+        if name == "fcfs":
+            raise ValueError("FCFS is required by policy fallback paths")
+
+        self.policy_registry.pop(name)
+        entry.event_handlers.clear()
+        entry.request_data.clear()
+
     def activate(self, name: str) -> None:
         self.policy = self._validate_and_adjust_policy(name, self.tree_cache)
 

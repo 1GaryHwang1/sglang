@@ -145,6 +145,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
     SchedulePolicyRegisterReqInput,
+    SchedulePolicyUnregisterReqInput,
     SchedulePolicySwitchReqInput,
     SendWeightsToRemoteInstanceReqInput,
     SeparateReasoningReqInput,
@@ -1617,6 +1618,22 @@ async def schedule_policy_register(
     """Register a custom schedule policy at runtime."""
     try:
         result = await _global_state.tokenizer_manager.schedule_policy_register(obj, request)
+    except Exception as e:
+        return _create_error_response(e)
+    return ORJSONResponse(
+        msgspec_to_builtins(result),
+        status_code=HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST,
+    )
+
+
+@app.api_route("/schedule_policy_unregister", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def schedule_policy_unregister(
+    obj: Annotated[SchedulePolicyUnregisterReqInput, Body()], request: Request
+):
+    """Unregister a custom schedule policy at runtime."""
+    try:
+        result = await _global_state.tokenizer_manager.schedule_policy_unregister(obj, request)
     except Exception as e:
         return _create_error_response(e)
     return ORJSONResponse(
