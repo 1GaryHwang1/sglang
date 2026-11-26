@@ -1134,6 +1134,7 @@ class Req(ReqDllmMixin):
         self.mamba_lazy_is_insert: bool = True
 
         # Check finish
+        self.scheduling_disabled = False
         self.tokenizer = None
         self.finished_reason: Optional[BaseFinishReason] = None
         # finished position (in output_ids), used when checking stop conditions with speculative decoding

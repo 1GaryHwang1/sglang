@@ -80,6 +80,11 @@ def handle_schedule_policy_register(
             if hasattr(module, event.value)
         }
 
+        if scheduler.enable_overlap:
+            while scheduler.result_queue:
+                batch, result = scheduler.result_queue.popleft()
+                scheduler.process_batch_result(batch, result)
+
         scheduler.policy.register(
             register_policy_name,
             rank_fn,
@@ -99,7 +104,7 @@ def handle_schedule_policy_register(
                 if scheduler.chunked_req is not None:
                     live_reqs.add(scheduler.chunked_req)
 
-                for req in live_reqs:
+                for req in sorted(live_reqs, key =lambda req: req.rid):
                     if not req.finished():
                         entry.initialize_request(req)
         except Exception:

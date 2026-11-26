@@ -1987,6 +1987,9 @@ class Scheduler(
                 self._record_scheduler_state_for_paused_engine()
                 continue
 
+            # Registration may have already settled the previous batch.
+            has_pending_result = bool(self.result_queue)
+
             # Get the next batch to run
             plan = self.get_next_batch_to_run(
                 running_batch=self.running_batch, last_batch=self.last_batch
@@ -1994,8 +1997,12 @@ class Scheduler(
             self.running_batch = plan.running_batch
             batch = plan.batch_to_run
             self.cur_batch_for_debug = batch
-            disable_overlap_for_batch = self.is_disable_overlap_for_batch(
-                batch, last_batch=self.last_batch
+            disable_overlap_for_batch = (
+                has_pending_result
+                and self.is_disable_overlap_for_batch(
+                    batch, 
+                    last_batch=self.last_batch,
+                )
             )
 
             # If we do not need to overlap the current batch with the last batch,
@@ -2021,8 +2028,9 @@ class Scheduler(
                 batch_result = None
                 self._sched_idled = True
 
-            # Process the last batch
-            if self.last_batch:
+            # Process the previous result only if it was still pending
+            # before the current batch was submitted.
+            if has_pending_result:
                 if not disable_overlap_for_batch:
                     pop_and_process()
             elif batch is None:
@@ -3382,10 +3390,14 @@ class Scheduler(
 
         if self.disaggregation_mode == DisaggregationMode.NULL:
             # Intake rejections have not entered the scheduling lifecycle.
-            if req.time_stats.wait_queue_entry_time > 0:
+            if (
+                req.time_stats.wait_queue_entry_time > 0
+                and not req.scheduling_disabled
+            ):
                 if not req.finished():
                     req.to_finish = req.to_finish or FINISH_ABORT()
                     req.update_finish_state(0)
+                req.scheduling_disabled = True
                 self.policy.trigger_event(SchedulingEvent.DISABLE, req)
 
             for entry in self.policy.policy_registry.values():
@@ -4342,7 +4354,10 @@ class Scheduler(
                 # has to leave the live set.
                 self.beam_coordinator.retire_group(req)
                 req.update_finish_state(0)
-                self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+                if not req.scheduling_disabled:
+                    req.scheduling_disabled = True
+                    self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+
                 for entry in self.policy.policy_registry.values():
                     entry.release_request(req)
 
@@ -4491,6 +4506,10 @@ class Scheduler(
                     # snapshot captures the post-consume state — restoring
                     # post-forward must not un-consume staging.
                     resolve_forward_inputs(batch, self.future_map)
+
+                    for req in batch.reqs:
+                        if not req.scheduling_disabled:
+                            self.policy.trigger_event(SchedulingEvent.ON_COMPUTE, req)
 
                     with self._forward_isolation(batch, overlap=True):
                         future_indices = batch.req_pool_indices
@@ -4872,6 +4891,7 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        settled_reqs: List[Req] = []
         # Flush async trace ops here: in overlap mode this CPU work runs while
         # the next batch's GPU forward is in flight, giving free overlap.
         flush_trace_batch(batch.reqs)
@@ -4885,14 +4905,18 @@ class Scheduler(
         )
 
         if batch.forward_mode.is_decode():
-            self.batch_result_processor.process_batch_result_decode(batch, result)
+            settled_reqs = (
+                self.batch_result_processor.process_batch_result_decode(batch, result)
+            )
         elif batch.forward_mode.is_extend():
             if batch.is_dllm():
                 self.process_batch_result_dllm(batch, result)
             elif self.disaggregation_mode == DisaggregationMode.PREFILL:
                 self.process_batch_result_disagg_prefill(batch, result)
             else:
-                self.batch_result_processor.process_batch_result_prefill(batch, result)
+                settled_reqs = (
+                    self.batch_result_processor.process_batch_result_prefill(batch, result)
+                )
         elif batch.forward_mode.is_prebuilt():
             self.batch_result_processor.process_batch_result_prebuilt(batch)
         elif batch.forward_mode.is_idle():
@@ -4913,10 +4937,13 @@ class Scheduler(
         self.maybe_send_health_check_signal()
         self.metrics_reporter.update_device_timer()
 
-        for req in batch.reqs:
-            self.policy.trigger_event(SchedulingEvent.ON_STOP, req)
+        for req in settled_reqs:
+            if not req.scheduling_disabled:
+                self.policy.trigger_event(SchedulingEvent.ON_STOP, req)
 
-            if req.finished():
+        for req in batch.reqs:
+            if req.finished() and not req.scheduling_disabled:
+                req.scheduling_disabled = True
                 self.policy.trigger_event(SchedulingEvent.DISABLE, req)
 
                 for entry in self.policy.policy_registry.values():
@@ -5714,7 +5741,7 @@ class Scheduler(
             # manipulation logic and the accounting bugs that come with it.
             return
 
-        if self.enable_overlap and self.last_batch:
+        if self.enable_overlap and self.result_queue:
             # Process the results of the last batch
             tmp_batch, tmp_result = self.result_queue.popleft()
             self.process_batch_result(tmp_batch, tmp_result)
@@ -5768,7 +5795,8 @@ class Scheduler(
                 req.time_stats.set_retract_time()
                 self.disagg_decode_prealloc_queue.hold_rebootstrap(req)
             else:
-                self._add_request_to_queue(req)
+                if self._add_request_to_queue(req):
+                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req)
         self.running_batch.batch_is_full = False
         # In disagg-PREFILL, keep a live mid-chunk chunked_req rather than retract it:
         # freeing its KV under a live disagg KV-sender crashes pop_bootstrapped or

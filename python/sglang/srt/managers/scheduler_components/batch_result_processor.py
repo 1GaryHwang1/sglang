@@ -258,7 +258,9 @@ class SchedulerBatchResultProcessor:
         self,
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
-    ):
+    ) -> List[Req]:
+        settled_reqs: List[Req] = []
+
         skip_stream_req = None
         self.token_to_kv_pool_allocator.free_group_begin()
 
@@ -340,6 +342,11 @@ class SchedulerBatchResultProcessor:
                     # aborted middle chunk in the chunked branch long enough to
                     # drain its accounting without streaming it.
                     continue
+
+                # Finished middle chunks may still need internal accounting,
+                # but must not receive scheduling callbacks after termination.
+                if not req.finished():
+                    settled_reqs.append(req)
 
                 if req.inflight_middle_chunks <= 0:
                     req.time_stats.set_prefill_finished_time()
@@ -492,6 +499,8 @@ class SchedulerBatchResultProcessor:
                 can_run_cuda_graph=can_run_cuda_graph,
                 dp_cooperation_info=batch.dp_cooperation_info,
             )
+
+        return settled_reqs
 
     def _convert_embeddings(self, *, result: EmbeddingBatchResult) -> list:
         is_sparse = envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.is_set()
@@ -922,7 +931,9 @@ class SchedulerBatchResultProcessor:
         self,
         batch: ScheduleBatch,
         result: GenerationBatchResult,
-    ):
+    ) -> List[Req]:
+        settled_reqs: List[Req] = []
+
         if result.copy_done is not None:
             result.copy_done.synchronize()
         auxiliary_output_starts = self.snapshot_auxiliary_output_starts(batch, result)
@@ -982,6 +993,9 @@ class SchedulerBatchResultProcessor:
                     id(req.beam_group) not in newly_finished_beam_groups
                 ):
                     continue
+
+                settled_reqs.append(req)
+
                 req.time_stats.set_last_decode_finish_time()
                 self._handle_finish_state_updated_req(
                     req, batch, result, i, logits_output
@@ -994,6 +1008,8 @@ class SchedulerBatchResultProcessor:
                 # NOTE: This (req.finished() or req.is_retracted) should only happen when overlap scheduling is enabled.
                 # And all the over-allocated tokens will be freed in `release_kv_cache`.
                 continue
+
+            settled_reqs.append(req)
 
             # next_token_id is a per-req list: 1 token for non-spec, the verified
             # run for spec (already grammar-truncated in _resolve_spec_v2_tokens).
@@ -1076,6 +1092,8 @@ class SchedulerBatchResultProcessor:
             running_batch=batch,
             num_generated_tokens=num_generated_tokens,
         )
+
+        return settled_reqs
 
     def _normalize_decode_outputs(
         self,
