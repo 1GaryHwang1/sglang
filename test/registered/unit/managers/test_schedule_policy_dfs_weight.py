@@ -2,8 +2,12 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from sglang.srt.managers.schedule_policy import SchedulePolicy
+from sglang.srt.managers.scheduler_components.schedule_events import (
+    SchedulingEngineView,
+)
+from sglang.srt.managers.scheduler_components.scheduling_policy import dfs_weight
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -30,6 +34,7 @@ class TestSchedulePolicyDfsWeight(CustomTestCase):
 
             def __init__(self):
                 self.root_node = root
+                self.disable = False
 
             @staticmethod
             def resolve_node_handle(node):
@@ -43,7 +48,17 @@ class TestSchedulePolicyDfsWeight(CustomTestCase):
             SimpleNamespace(last_node=branch_a, name="a-parent"),
         ]
 
-        SchedulePolicy._sort_by_dfs_weight(waiting_queue, TreeCache())
+        data = dfs_weight.initialize_policy(
+            SchedulingEngineView(
+                tree_cache=TreeCache(),
+                enable_hierarchical_cache=False,
+                enable_priority_scheduling=False,
+                schedule_low_priority_values_first=False,
+                running_reqs=(),
+            )
+        )
+        with patch.object(dfs_weight, "_compute_prefix_matches", return_value=set()):
+            dfs_weight.rank(waiting_queue, data)
 
         self.assertEqual(
             [req.name for req in waiting_queue],

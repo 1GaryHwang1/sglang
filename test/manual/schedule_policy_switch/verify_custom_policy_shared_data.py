@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING
 import requests
 
 if TYPE_CHECKING:
-    from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+    from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.managers.scheduler_components.schedule_events import (
+        SchedulingEngineView,
+    )
 
 
 SHORTEST_POLICY = "manual_shared_shortest"
@@ -94,7 +97,7 @@ def _record_snapshot(
     waiting_queue: list[Req],
     request_data: dict[str, RequestData],
     policy_data: PolicyData,
-    running_batch: ScheduleBatch,
+    engine_view: SchedulingEngineView,
 ) -> None:
     """Send actual Scheduler-process values to the manual test's client output."""
     snapshot = {
@@ -123,7 +126,7 @@ def _record_snapshot(
             }
             for req in waiting_queue
         ],
-        "running_rids": [req.rid for req in running_batch.reqs],
+        "running_rids": [req.rid for req in engine_view.running_reqs],
     }
     with SNAPSHOT_FILE.open("a", encoding="utf-8") as file:
         file.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
@@ -133,7 +136,7 @@ def _rank(
     waiting_queue: list[Req],
     request_data: dict[str, RequestData],
     policy_data: PolicyData,
-    running_batch: ScheduleBatch,
+    engine_view: SchedulingEngineView,
     expected_label: str,
 ) -> None:
     assert _policy_initializations == 1, "共享数据初始化次数不是一次"
@@ -142,7 +145,7 @@ def _rank(
     assert policy_data.request_initializations == len(policy_data.initialized_rids)
 
     live_reqs = [
-        req for req in [*waiting_queue, *running_batch.reqs] if not req.finished()
+        req for req in [*waiting_queue, *engine_view.running_reqs] if not req.finished()
     ]
     assert set(request_data) == {req.rid for req in live_reqs}, (
         "请求数据缺失或在完成/取消后未清理"
@@ -194,28 +197,26 @@ def _rank(
         )
     )
     for number in sorted(new_rounds):
-        _record_snapshot(
-            number, waiting_queue, request_data, policy_data, running_batch
-        )
+        _record_snapshot(number, waiting_queue, request_data, policy_data, engine_view)
 
 
 def rank_shortest(
     waiting_queue: list[Req],
     policy_data: PolicyData,
     request_data: dict[str, RequestData],
-    running_batch: ScheduleBatch,
+    engine_view: SchedulingEngineView,
 ) -> None:
-    _rank(waiting_queue, request_data, policy_data, running_batch, "shortest")
+    _rank(waiting_queue, request_data, policy_data, engine_view, "shortest")
 
 
 def rank_longest(
     waiting_queue: list[Req],
     *,
     request_data: dict[str, RequestData],
-    running_batch: ScheduleBatch,
+    engine_view: SchedulingEngineView,
     policy_data: PolicyData,
 ) -> None:
-    _rank(waiting_queue, request_data, policy_data, running_batch, "longest")
+    _rank(waiting_queue, request_data, policy_data, engine_view, "longest")
 
 
 class SharedPolicyDataVerifier:
@@ -240,7 +241,8 @@ class SharedPolicyDataVerifier:
     def print_data_model() -> None:
         print(
             "\n本测试使用的数据（共享范围是单个 Scheduler 进程内的单个策略）：\n"
-            "  框架提供：waiting_queue、running_batch、req。\n"
+            "  框架提供：waiting_queue、engine_view、req。\n"
+            "    engine_view.running_reqs：本轮规划中的运行请求。\n"
             "    req.sampling_params.max_new_tokens：初始化请求的输出预算。\n"
             "    req.time_stats.wait_queue_entry_time：排序分数相同时按入队时间排序。\n"
             "  policy_data：每个策略独立一份 PolicyData，供本策略全部请求共享。\n"
@@ -251,7 +253,7 @@ class SharedPolicyDataVerifier:
             "    output_budget：该请求独有的输出预算，从 max_new_tokens 复制。\n"
             "    shared：引用本策略的 policy_data，所有请求都指向同一个对象。\n"
             "  初始化函数接收 req、policy_data；排序函数接收 waiting_queue、\n"
-            "    running_batch、policy_data、request_data。\n"
+            "    engine_view、policy_data、request_data。\n"
             "  对象地址来自 Scheduler 进程，用于比较共享对象及同时存活的请求对象。",
             flush=True,
         )
@@ -314,7 +316,7 @@ class SharedPolicyDataVerifier:
                 flush=True,
             )
         print(
-            f"  running_batch（框架数据）：{running}\n"
+            f"  engine_view.running_reqs（框架数据）：{running}\n"
             "  排序键：output_sign × output_budget，然后按入队时间排序。",
             flush=True,
         )

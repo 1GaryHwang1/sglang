@@ -5,6 +5,27 @@ them in the development container, from the repository root, on a dedicated
 server. Policy names are fixed, so restart the server before repeating a run.
 No changes to production code are required by these tests.
 
+`enable`, `on_preempt`, and `disable` receive one `req`. `on_sort` receives
+`reqs` and an optional `engine_view` once per ranking pass; `enable` can also
+declare `engine_view`. `on_batch`,
+`on_compute`, and `on_stop` receive `reqs` and an optional `batch` once per batch
+event. These tests iterate `reqs` inside the callbacks to retain per-request
+metrics. `on_stop` sees only requests whose results were applied. The engine
+view's `running_reqs` comes from the current planning pass, and its membership
+is read-only; the request objects themselves remain mutable.
+
+## Batch event dispatch without a model
+
+```bash
+python test/manual/schedule_policy_switch/verify_batch_events.py
+```
+
+This check calls real Scheduler planning, submission, and result-processing
+methods with substituted model/cache services. It verifies one callback per
+batch, keyword-only and batch-only handlers, the current planning view, and
+stop-before-disable cleanup. Both ordinary overlap and non-overlap submission
+branches are exercised; no GPU forward is run.
+
 ## Normal execution, cancellation, and priority preemption
 
 Start the server in one terminal:

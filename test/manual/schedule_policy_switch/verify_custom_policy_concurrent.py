@@ -13,10 +13,41 @@ import math
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
 import aiohttp
+
+
+@dataclass
+class PolicyData:
+    processed_tokens: int = 0
+
+
+@dataclass
+class RequestData:
+    arrival_processed_tokens: int
+
+
+def initialize_policy():
+    return PolicyData()
+
+
+def initialize_request(req, policy_data):
+    return RequestData(arrival_processed_tokens=policy_data.processed_tokens)
+
+
+def enable(req, request_data, policy_data):
+    request_data[req.rid] = initialize_request(req, policy_data)
+
+
+def on_preempt(req, request_data, policy_data):
+    request_data[req.rid].arrival_processed_tokens = policy_data.processed_tokens
+
+
+def on_compute(batch, policy_data):
+    policy_data.processed_tokens += batch.extend_num_tokens or 0
 
 
 def record_rank_inputs(function, waiting_queue, **inputs):
@@ -33,23 +64,29 @@ def record_rank_inputs(function, waiting_queue, **inputs):
         file.write(json.dumps(record) + "\n")
 
 
-def running_inputs(running_batch):
-    from sglang.srt.managers.schedule_batch import ScheduleBatch
+def running_inputs(engine_view):
+    from sglang.srt.managers.scheduler_components.schedule_events import (
+        SchedulingEngineView,
+    )
 
-    assert isinstance(running_batch, ScheduleBatch), type(running_batch)
-    assert running_batch.batch_size() == len(running_batch.reqs)
+    assert isinstance(engine_view, SchedulingEngineView), type(engine_view)
+    running_reqs = engine_view.running_reqs
+    assert isinstance(running_reqs, tuple), type(running_reqs)
     return {
-        "running_count": running_batch.batch_size(),
-        "running_rids": [req.rid for req in running_batch.reqs],
+        "running_count": len(running_reqs),
+        "running_rids": [req.rid for req in running_reqs],
         "running_output_lengths": [
-            req.sampling_params.max_new_tokens for req in running_batch.reqs
+            req.sampling_params.max_new_tokens for req in running_reqs
         ],
     }
 
 
-def token_inputs(waiting_queue, processed_tokens):
+def token_inputs(waiting_queue, request_data, policy_data):
+    processed_tokens = policy_data.processed_tokens
     assert type(processed_tokens) is int and processed_tokens >= 0
-    arrivals = {req.rid: req.arrival_processed_tokens for req in waiting_queue}
+    arrivals = {
+        req.rid: request_data[req.rid].arrival_processed_tokens for req in waiting_queue
+    }
     assert all(0 <= arrival <= processed_tokens for arrival in arrivals.values())
     return {"processed_tokens": processed_tokens, "arrival_processed_tokens": arrivals}
 
@@ -64,8 +101,8 @@ def rank_shortest_output_first(waiting_queue):
     record_rank_inputs("rank_shortest_output_first", waiting_queue)
 
 
-def rank_running_output_first(waiting_queue, running_batch):
-    inputs = running_inputs(running_batch)
+def rank_running_output_first(waiting_queue, engine_view):
+    inputs = running_inputs(engine_view)
     running_lengths = set(inputs["running_output_lengths"])
     waiting_queue.sort(
         key=lambda req: (
@@ -77,12 +114,13 @@ def rank_running_output_first(waiting_queue, running_batch):
     record_rank_inputs("rank_running_output_first", waiting_queue, **inputs)
 
 
-def rank_token_aged_first(waiting_queue, *, processed_tokens):
-    inputs = token_inputs(waiting_queue, processed_tokens)
+def rank_token_aged_first(waiting_queue, *, request_data, policy_data):
+    inputs = token_inputs(waiting_queue, request_data, policy_data)
     waiting_queue.sort(
         key=lambda req: (
             -Fraction(
-                processed_tokens - req.arrival_processed_tokens,
+                policy_data.processed_tokens
+                - request_data[req.rid].arrival_processed_tokens,
                 req.sampling_params.max_new_tokens,
             ),
             req.time_stats.wait_queue_entry_time,
@@ -91,15 +129,16 @@ def rank_token_aged_first(waiting_queue, *, processed_tokens):
     record_rank_inputs("rank_token_aged_first", waiting_queue, **inputs)
 
 
-def rank_loaded_token_aged_first(waiting_queue, processed_tokens, running_batch):
+def rank_loaded_token_aged_first(waiting_queue, engine_view, request_data, policy_data):
     inputs = {
-        **token_inputs(waiting_queue, processed_tokens),
-        **running_inputs(running_batch),
+        **token_inputs(waiting_queue, request_data, policy_data),
+        **running_inputs(engine_view),
     }
     waiting_queue.sort(
         key=lambda req: (
             -Fraction(
-                processed_tokens - req.arrival_processed_tokens,
+                policy_data.processed_tokens
+                - request_data[req.rid].arrival_processed_tokens,
                 req.sampling_params.max_new_tokens + inputs["running_count"],
             ),
             req.time_stats.wait_queue_entry_time,
@@ -309,7 +348,7 @@ class ConcurrentVerifier:
         )
         inputs = rank_inputs["inputs"]
         parameters = inspect.signature(globals()[function]).parameters
-        if "running_batch" in parameters:
+        if "engine_view" in parameters:
             count = inputs["running_count"]
             assert type(count) is int and count > 0, inputs
             assert (
@@ -318,9 +357,10 @@ class ConcurrentVerifier:
                 == len(inputs["running_output_lengths"])
             )
             assert set(inputs["running_rids"]).isdisjoint(rank_inputs["queue_rids"])
-        if "processed_tokens" in parameters:
+        if "policy_data" in parameters:
             processed = inputs["processed_tokens"]
-            assert type(processed) is int and processed > 0, inputs
+            # A policy registered mid-run can rank before its first extend event.
+            assert type(processed) is int and processed >= 0, inputs
             arrivals = inputs["arrival_processed_tokens"]
             assert set(arrivals) == set(rank_inputs["queue_rids"])
             assert all(0 <= value <= processed for value in arrivals.values())

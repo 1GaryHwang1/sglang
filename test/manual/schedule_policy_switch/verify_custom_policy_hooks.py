@@ -141,11 +141,12 @@ def enable(req, request_data, policy_data):
     _record("enable", req, request_data, policy_data)
 
 
-def on_sort(req, request_data, policy_data):
-    data = request_data[req.rid]
-    data.waiting_seconds = time.perf_counter() - req.time_stats.wait_queue_entry_time
-    data.score = req.priority * 10000 + data.remaining_tokens
-    _record("on_sort", req, request_data, policy_data)
+def on_sort(reqs, request_data, policy_data):
+    for req in reqs:
+        data = request_data[req.rid]
+        data.waiting_seconds = time.perf_counter() - req.time_stats.wait_queue_entry_time
+        data.score = req.priority * 10000 + data.remaining_tokens
+        _record("on_sort", req, request_data, policy_data)
 
 
 def rank(waiting_queue, request_data, policy_data):
@@ -164,18 +165,19 @@ def rank(waiting_queue, request_data, policy_data):
     )
 
 
-def on_batch(req, request_data, policy_data):
-    data = request_data[req.rid]
-    data.phase = "runnable"
-    if req.decode_batch_idx > data.last_decode_idx:
-        data.round_kind = "decode"
-        data.decode_rounds += 1
-    else:
-        data.round_kind = "prefill"
-        data.prefill_rounds += 1
-    data.last_extend_idx = req.extend_batch_idx
-    data.last_decode_idx = req.decode_batch_idx
-    _record("on_batch", req, request_data, policy_data)
+def on_batch(reqs, request_data, policy_data):
+    for req in reqs:
+        data = request_data[req.rid]
+        data.phase = "runnable"
+        if req.decode_batch_idx > data.last_decode_idx:
+            data.round_kind = "decode"
+            data.decode_rounds += 1
+        else:
+            data.round_kind = "prefill"
+            data.prefill_rounds += 1
+        data.last_extend_idx = req.extend_batch_idx
+        data.last_decode_idx = req.decode_batch_idx
+        _record("on_batch", req, request_data, policy_data)
 
 
 def on_preempt(req, request_data, policy_data):
@@ -187,23 +189,25 @@ def on_preempt(req, request_data, policy_data):
     _record("on_preempt", req, request_data, policy_data)
 
 
-def on_compute(req, request_data, policy_data):
-    data = request_data[req.rid]
-    data.phase = "running"
-    data.output_before_compute = len(req.output_ids)
-    data.compute_started_at = time.monotonic()
-    _record("on_compute", req, request_data, policy_data)
+def on_compute(reqs, request_data, policy_data):
+    for req in reqs:
+        data = request_data[req.rid]
+        data.phase = "running"
+        data.output_before_compute = len(req.output_ids)
+        data.compute_started_at = time.monotonic()
+        _record("on_compute", req, request_data, policy_data)
 
 
-def on_stop(req, request_data, policy_data):
-    data = request_data[req.rid]
-    delta = len(req.output_ids) - data.output_before_compute
-    data.generated_tokens += delta
-    data.remaining_tokens = data.output_budget - len(req.output_ids)
-    data.no_output_rounds += int(delta == 0)
-    data.compute_seconds += time.monotonic() - data.compute_started_at
-    data.phase = "settled"
-    _record("on_stop", req, request_data, policy_data)
+def on_stop(reqs, request_data, policy_data):
+    for req in reqs:
+        data = request_data[req.rid]
+        delta = len(req.output_ids) - data.output_before_compute
+        data.generated_tokens += delta
+        data.remaining_tokens = data.output_budget - len(req.output_ids)
+        data.no_output_rounds += int(delta == 0)
+        data.compute_seconds += time.monotonic() - data.compute_started_at
+        data.phase = "settled"
+        _record("on_stop", req, request_data, policy_data)
 
 
 def disable(req, request_data, policy_data):

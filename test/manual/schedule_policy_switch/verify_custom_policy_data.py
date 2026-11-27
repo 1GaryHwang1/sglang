@@ -23,7 +23,10 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 if TYPE_CHECKING:
-    from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+    from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.managers.scheduler_components.schedule_events import (
+        SchedulingEngineView,
+    )
 
 
 POLICY_NAME = "manual_request_data"
@@ -57,11 +60,11 @@ def enable(req: Req, request_data: dict[str, RequestData]) -> None:
 def rank_by_request_data(
     waiting_queue: list[Req],
     request_data: dict[str, RequestData],
-    running_batch: ScheduleBatch,
+    engine_view: SchedulingEngineView,
 ) -> None:
     """Check initialization/cleanup, then sort using only the stored data."""
     live_reqs = [
-        req for req in [*waiting_queue, *running_batch.reqs] if not req.finished()
+        req for req in [*waiting_queue, *engine_view.running_reqs] if not req.finished()
     ]
     live_rids = {req.rid for req in live_reqs}
     missing = live_rids - request_data.keys()

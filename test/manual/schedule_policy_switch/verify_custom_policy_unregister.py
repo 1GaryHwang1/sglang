@@ -126,24 +126,28 @@ def enable(req, request_data, policy_data):
     _event("enable", req, request_data, policy_data)
 
 
-def on_sort(req, request_data, policy_data):
-    _event("on_sort", req, request_data, policy_data)
+def on_sort(reqs, request_data, policy_data):
+    for req in reqs:
+        _event("on_sort", req, request_data, policy_data)
 
 
-def on_batch(req, request_data, policy_data):
-    _event("on_batch", req, request_data, policy_data)
+def on_batch(reqs, request_data, policy_data):
+    for req in reqs:
+        _event("on_batch", req, request_data, policy_data)
 
 
 def on_preempt(req, request_data, policy_data):
     _event("on_preempt", req, request_data, policy_data)
 
 
-def on_compute(req, request_data, policy_data):
-    _event("on_compute", req, request_data, policy_data)
+def on_compute(reqs, request_data, policy_data):
+    for req in reqs:
+        _event("on_compute", req, request_data, policy_data)
 
 
-def on_stop(req, request_data, policy_data):
-    _event("on_stop", req, request_data, policy_data)
+def on_stop(reqs, request_data, policy_data):
+    for req in reqs:
+        _event("on_stop", req, request_data, policy_data)
 
 
 def disable(req, request_data, policy_data):

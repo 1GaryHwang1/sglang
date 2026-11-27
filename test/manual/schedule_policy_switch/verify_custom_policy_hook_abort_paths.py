@@ -28,7 +28,18 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 
 def make_scheduler():
     scheduler = Scheduler.__new__(Scheduler)
+    scheduler.tree_cache = SimpleNamespace(
+        finish=lambda *args: None,
+        req_to_token_pool=SimpleNamespace(mamba_allocator=None),
+    )
+    scheduler.enable_hierarchical_cache = False
+    scheduler.enable_priority_scheduling = False
+    scheduler.schedule_low_priority_values_first = True
+    scheduler.running_batch = SimpleNamespace(reqs=[])
     scheduler.policy = SchedulePolicy.__new__(SchedulePolicy)
+    scheduler.policy.engine_view = scheduler.get_scheduling_engine_view(
+        scheduler.running_batch
+    )
     scheduler.policy.policy_registry = {}
     for name in hooks.POLICIES:
         scheduler.policy.register(
@@ -44,13 +55,7 @@ def make_scheduler():
     scheduler.policy.policy = scheduler.policy.policy_registry[hooks.POLICIES[0]]
     scheduler.waiting_queue = []
     scheduler.disaggregation_mode = DisaggregationMode.NULL
-    scheduler.tree_cache = SimpleNamespace(
-        finish=lambda *args: None,
-        req_to_token_pool=SimpleNamespace(mamba_allocator=None),
-    )
-    scheduler.enable_priority_scheduling = False
     scheduler.abort_on_priority_when_disabled = True
-    scheduler.schedule_low_priority_values_first = True
     scheduler.max_queued_requests = 1
     scheduler.processed_tokens_counter = 0
     scheduler._prefetch_kvcache = lambda req: None
@@ -77,7 +82,11 @@ def make_req(rid, priority=None):
 
 def admit(scheduler, req):
     assert scheduler._add_request_to_queue(req)
-    scheduler.policy.trigger_event(SchedulingEvent.ENABLE, req)
+    scheduler.policy.trigger_event(
+        SchedulingEvent.ENABLE,
+        req=req,
+        engine_view=scheduler.get_scheduling_engine_view(scheduler.running_batch),
+    )
 
 
 def check_terminal(scheduler, req):

@@ -12,6 +12,9 @@ from sglang.srt.managers.schedule_policy import (
     SchedulePolicy,
     estimate_prefill_extend_tile_metrics,
 )
+from sglang.srt.managers.scheduler_components.schedule_events import (
+    SchedulingEngineView,
+)
 from sglang.srt.mem_cache.allocator.page_interleave import PageInterleavePoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
@@ -207,10 +210,13 @@ class TestPrefillAdder(CustomTestCase):
         adder = self.create_shortest_prefill_adder()
         policy = SchedulePolicy(
             policy="shortest-prefill-first",
-            tree_cache=RadixCache.create_simulated(),
-            enable_hierarchical_cache=True,
-            enable_priority_scheduling=False,
-            schedule_low_priority_values_first=False,
+            engine_view=SchedulingEngineView(
+                tree_cache=RadixCache.create_simulated(),
+                enable_hierarchical_cache=True,
+                enable_priority_scheduling=False,
+                schedule_low_priority_values_first=False,
+                running_reqs=(),
+            ),
         )
         continuation = self.create_shared_req("continuation")
         continuation.full_untruncated_fill_ids = list(range(16384))
