@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 
 
 class SchedulingEvent(Enum):
-    """Per-request event contract for normal generation scheduling.
+    """Request and batch callback contract for normal generation scheduling.
 
     record: the request is being received, before its first waiting-queue entry.
     in queue: the request belongs to waiting_queue, including requests that were
@@ -47,6 +49,12 @@ class SchedulingEvent(Enum):
     Emit callbacks for the transition that actually occurs, even when a shared
     helper handles multiple transitions. Every registered policy with a handler
     receives the event, including policies that are not currently active.
+    ENABLE, ON_PREEMPT, and DISABLE receive one request as ``req``. ON_SORT
+    receives ``reqs`` and an engine view once per ranking pass. ON_BATCH,
+    ON_COMPUTE, and ON_STOP receive ``reqs`` and ``batch`` once per batch event.
+    ``reqs`` contains only requests participating in this event; ON_STOP excludes
+    requests whose results were discarded. Batch metadata may still describe
+    other rows, so per-request updates must iterate ``reqs``, not ``batch.reqs``.
     """
 
     # record -> in queue: emit once after successful first entry into waiting_queue.
@@ -54,11 +62,11 @@ class SchedulingEvent(Enum):
     ENABLE = "enable"
 
     # in queue -> candidate: emit immediately before waiting_queue is ranked so
-    # handlers can update the data used by that rank. Emit for each request being
-    # ranked, on every actual ranking pass. Unselected requests remain in queue.
+    # handlers can update the data used by that rank. Emit once per actual
+    # ranking pass with all requests being ranked. Unselected requests stay queued.
     ON_SORT = "on_sort"
 
-    # candidate -> runnable: emit once per request selected for this round, after
+    # candidate -> runnable: emit once for the selected execution batch, after
     # resource checks, preemption, and batch mixing finalize the participants.
     # Applies to prefill, every chunk-prefill round, and every decode round.
     # Under overlap, the previous round's ON_STOP may not have run yet.
@@ -69,13 +77,13 @@ class SchedulingEvent(Enum):
     # preemption, once per occurrence. This transition does not emit ENABLE.
     ON_PREEMPT = "on_preempt"
 
-    # runnable -> running: emit once per participating request after inputs are
+    # runnable -> running: emit once for the execution batch after inputs are
     # prepared, immediately before submitting the forward pass for GPU execution.
     # This marks CPU submission, not the actual GPU kernel start time, and does
     # not imply that the previous round's results have been applied to Req.
     ON_COMPUTE = "on_compute"
 
-    # running -> settled: emit after the round's results, including output and
+    # running -> settled: emit once after the round's results, including output and
     # completion state, have been applied to the request and before its custom
     # scheduling data is removed. Include intermediate prefill chunks that produce
     # no output token. Do not emit for results discarded because the request was
@@ -89,9 +97,31 @@ class SchedulingEvent(Enum):
     # Normal completion emits ON_STOP for the final round before DISABLE; a
     # request terminated without a forward pass does not require ON_STOP.
     # Emit DISABLE only once. Discarded results from rounds submitted earlier
-    # must not emit further callbacks or access the cleaned-up request data.
+    # must not include the request in further events or access its cleaned-up data.
     DISABLE = "disable"
 
 
+EVENT_INPUTS = {
+    SchedulingEvent.ENABLE: ("req","engine_view"),
+    SchedulingEvent.ON_SORT: ("reqs", "engine_view"),
+    SchedulingEvent.ON_BATCH: ("reqs", "batch"),
+    SchedulingEvent.ON_PREEMPT: ("req",),
+    SchedulingEvent.ON_COMPUTE: ("reqs", "batch"),
+    SchedulingEvent.ON_STOP: ("reqs", "batch"),
+    SchedulingEvent.DISABLE: ("req",),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulingEngineView:
+    """Read-only membership from the current planning pass; Req stays mutable."""
+    tree_cache: BasePrefixCache
+    enable_hierarchical_cache: bool
+    enable_priority_scheduling: bool
+    schedule_low_priority_values_first: bool
+
+    running_reqs: tuple[Req, ...]
+
+
 # Internal signature after registration-time argument adaptation and data binding.
-EventHandler = Callable[["Req"], None]
+EventHandler = Callable[..., None]

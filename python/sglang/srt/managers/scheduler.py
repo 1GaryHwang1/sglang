@@ -285,6 +285,7 @@ from sglang.srt.managers.scheduler_components import schedule_policy_register
 from sglang.srt.managers.scheduler_components import schedule_policy_unregister
 from sglang.srt.managers.scheduler_components import schedule_policy_switch
 from sglang.srt.managers.scheduler_components.schedule_events import (
+    SchedulingEngineView,
     SchedulingEvent,
 )
 from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
@@ -1396,12 +1397,11 @@ class Scheduler(
 
     def init_schedule_policy(self):
         # Init schedule policy and new token estimation
+        engine_view = self.get_scheduling_engine_view(self.running_batch)
+
         self.policy = SchedulePolicy(
-            self.schedule_policy,
-            self.tree_cache,
-            self.enable_hierarchical_cache,
-            self.enable_priority_scheduling,
-            self.schedule_low_priority_values_first,
+            policy=self.schedule_policy,
+            engine_view=engine_view
         )
         self.prefill_delayer: Optional[PrefillDelayer] = None
         self.prefill_bs_tracker = RecentPrefillBatchSizeTracker(
@@ -1866,6 +1866,20 @@ class Scheduler(
         }
 
         return result_dict
+
+    def get_scheduling_engine_view(
+        self,
+        running_batch: ScheduleBatch,
+    ) -> SchedulingEngineView:
+        return SchedulingEngineView(
+            tree_cache=self.tree_cache,
+            enable_hierarchical_cache=self.enable_hierarchical_cache,
+            enable_priority_scheduling=self.enable_priority_scheduling,
+            schedule_low_priority_values_first=(
+                self.schedule_low_priority_values_first
+            ),
+            running_reqs=tuple(running_batch.reqs),
+        )
 
     def release_host_resources(self) -> None:
         # Release pinned host buffers in userspace on graceful shutdown; see
@@ -2911,7 +2925,11 @@ class Scheduler(
             if isinstance(req.finished_reason, FINISH_ABORT):
                 self.init_req_max_new_tokens(req)
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
         else:
@@ -2934,7 +2952,11 @@ class Scheduler(
             req.set_finish_with_abort(error_msg)
             self.init_req_max_new_tokens(req)
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         if recv_req.pp_prefetch_ticketed is True:
@@ -2949,7 +2971,11 @@ class Scheduler(
             )
             self.init_req_max_new_tokens(req)
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         if error_msg := self.validate_dllm_request(req):
@@ -2971,7 +2997,11 @@ class Scheduler(
                 req.set_finish_with_abort(error_msg)
                 self.init_req_max_new_tokens(req)
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
         if self.spec_algorithm.is_uno():
@@ -2980,7 +3010,11 @@ class Scheduler(
                 req.set_finish_with_abort(error_msg)
                 self.init_req_max_new_tokens(req)
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
         if req.return_sampling_mask:
@@ -3039,7 +3073,11 @@ class Scheduler(
                 )
                 self.init_req_max_new_tokens(req)
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
             SessionController.adjust_mm_offsets(recv_req, req, image_inputs)
@@ -3066,7 +3104,11 @@ class Scheduler(
                 )
                 self.init_req_max_new_tokens(req)
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
         # initialize before returning
@@ -3081,7 +3123,11 @@ class Scheduler(
         if error_msg:
             req.set_finish_with_abort(error_msg)
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         if not recv_req.return_logprob and recv_req.logprob_start_len != -1:
@@ -3108,7 +3154,11 @@ class Scheduler(
             req.logprob_start_len = -1
             req.set_finish_with_abort(error_msg)
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         if (
@@ -3127,7 +3177,11 @@ class Scheduler(
             req.logprob_start_len = -1
             req.set_finish_with_abort(error_msg)
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         if recv_req.return_routed_experts:
@@ -3149,7 +3203,11 @@ class Scheduler(
                 req.routed_experts_start_len = 0
                 req.set_finish_with_abort(error_msg)
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
         if get_parallel().pp_rank == 0 and getattr(
@@ -3161,7 +3219,11 @@ class Scheduler(
         added_to_grammar_queue = self.grammar_manager.process_req_with_grammar(req)
         if not added_to_grammar_queue:
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
 
     def handle_batch_generate_request(
         self,
@@ -3398,7 +3460,7 @@ class Scheduler(
                     req.to_finish = req.to_finish or FINISH_ABORT()
                     req.update_finish_state(0)
                 req.scheduling_disabled = True
-                self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+                self.policy.trigger_event(SchedulingEvent.DISABLE, req=req)
 
             for entry in self.policy.policy_registry.values():
                 entry.release_request(req)
@@ -3535,7 +3597,11 @@ class Scheduler(
                 err_type="InternalServerError",
             )
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         # Handle multimodal inputs
@@ -3549,7 +3615,11 @@ class Scheduler(
                     err_type="InternalServerError",
                 )
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             # The `pad_input_ids_func` is model-specific and may be None for
@@ -3574,7 +3644,11 @@ class Scheduler(
                     )
                 )
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(self.running_batch),
+                    )
                 return
 
         # Validate prompts length
@@ -3585,13 +3659,21 @@ class Scheduler(
         )
         if error_msg:
             if self._add_request_to_queue(req):
-                self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ENABLE, 
+                    req=req,
+                    engine_view=self.get_scheduling_engine_view(self.running_batch),
+                )
             return
 
         # Copy more attributes
         req.logprob_start_len = -1
         if self._add_request_to_queue(req):
-            self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+            self.policy.trigger_event(
+                SchedulingEvent.ENABLE, 
+                req=req,
+                engine_view=self.get_scheduling_engine_view(self.running_batch),
+            )
 
     def handle_batch_embedding_request(
         self,
@@ -3857,8 +3939,11 @@ class Scheduler(
             if self.enable_fpm:
                 ret.fpm_start_time = self._fpm_batch_t0
 
-            for req in ret.reqs:
-                self.policy.trigger_event(SchedulingEvent.ON_BATCH, req)
+            self.policy.trigger_event(
+                SchedulingEvent.ON_BATCH,
+                reqs=tuple(req for req in ret.reqs if not req.scheduling_disabled),
+                batch=ret,
+            )
 
         return NextBatchPlan(batch_to_run=ret, running_batch=running_batch)
 
@@ -3919,7 +4004,11 @@ class Scheduler(
             ready_grammar_requests = self.grammar_manager.get_ready_grammar_requests()
             for req in ready_grammar_requests:
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ENABLE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ENABLE, 
+                        req=req,
+                        engine_view=self.get_scheduling_engine_view(running_batch),
+                    )
 
         if self.enable_priority_preemption or self.is_hybrid_swa:
             # Reset batch_is_full to try preemption with a prefill adder.
@@ -3957,13 +4046,17 @@ class Scheduler(
             running_batch.batch_is_full = True
             return None, running_batch
 
-        for req in self.waiting_queue:
-            self.policy.trigger_event(SchedulingEvent.ON_SORT, req)
+        engine_view = self.get_scheduling_engine_view(running_batch)
+
+        self.policy.trigger_event(
+            SchedulingEvent.ON_SORT,
+            reqs=tuple(self.waiting_queue),
+            engine_view=engine_view,
+        )
 
         # Get priority queue
         available_parameters = {
-            "running_batch": running_batch,
-            "processed_tokens": self.processed_tokens_counter,
+            "engine_view": engine_view,
             "request_data": self.policy.policy.request_data,
             "policy_data": self.policy.policy.policy_data,
         }
@@ -4179,7 +4272,7 @@ class Scheduler(
         if adder.preempt_list:
             for req in adder.preempt_list:
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req)
+                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req=req)
 
         if adder.new_chunked_req is not None:
             # Update chunked prefill
@@ -4356,7 +4449,7 @@ class Scheduler(
                 req.update_finish_state(0)
                 if not req.scheduling_disabled:
                     req.scheduling_disabled = True
-                    self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+                    self.policy.trigger_event(SchedulingEvent.DISABLE, req=req)
 
                 for entry in self.policy.policy_registry.values():
                     entry.release_request(req)
@@ -4377,7 +4470,7 @@ class Scheduler(
 
             for req in retracted_reqs:
                 if self._add_request_to_queue(req, is_retracted=True):
-                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req)
+                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req=req)
         else:
             self.new_token_ratio_tracker.decay_step()
 
@@ -4507,9 +4600,13 @@ class Scheduler(
                     # post-forward must not un-consume staging.
                     resolve_forward_inputs(batch, self.future_map)
 
-                    for req in batch.reqs:
-                        if not req.scheduling_disabled:
-                            self.policy.trigger_event(SchedulingEvent.ON_COMPUTE, req)
+                    self.policy.trigger_event(
+                        SchedulingEvent.ON_COMPUTE,
+                        reqs=tuple(
+                            req for req in batch.reqs if not req.scheduling_disabled
+                        ),
+                        batch=batch,
+                    )
 
                     with self._forward_isolation(batch, overlap=True):
                         future_indices = batch.req_pool_indices
@@ -4707,8 +4804,11 @@ class Scheduler(
                 )
                 resolve_forward_inputs(batch, self.future_map)
 
-                for req in batch.reqs:
-                    self.policy.trigger_event(SchedulingEvent.ON_COMPUTE, req)
+                self.policy.trigger_event(
+                    SchedulingEvent.ON_COMPUTE,
+                    reqs=tuple(req for req in batch.reqs if not req.scheduling_disabled),
+                    batch=batch,
+                )
 
                 batch_result = self.model_worker.forward_batch_generation(
                     batch, **kwargs
@@ -4937,14 +5037,20 @@ class Scheduler(
         self.maybe_send_health_check_signal()
         self.metrics_reporter.update_device_timer()
 
-        for req in settled_reqs:
-            if not req.scheduling_disabled:
-                self.policy.trigger_event(SchedulingEvent.ON_STOP, req)
+        settled_reqs = tuple(
+            req for req in settled_reqs if not req.scheduling_disabled
+        )
+        if settled_reqs:
+            self.policy.trigger_event(
+                SchedulingEvent.ON_STOP,
+                reqs=settled_reqs,
+                batch=batch,
+            )
 
         for req in batch.reqs:
             if req.finished() and not req.scheduling_disabled:
                 req.scheduling_disabled = True
-                self.policy.trigger_event(SchedulingEvent.DISABLE, req)
+                self.policy.trigger_event(SchedulingEvent.DISABLE, req=req)
 
                 for entry in self.policy.policy_registry.values():
                     entry.release_request(req)
@@ -5796,7 +5902,7 @@ class Scheduler(
                 self.disagg_decode_prealloc_queue.hold_rebootstrap(req)
             else:
                 if self._add_request_to_queue(req):
-                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req)
+                    self.policy.trigger_event(SchedulingEvent.ON_PREEMPT, req=req)
         self.running_batch.batch_is_full = False
         # In disagg-PREFILL, keep a live mid-chunk chunked_req rather than retract it:
         # freeing its KV under a live disagg KV-sender crashes pop_bootstrapped or

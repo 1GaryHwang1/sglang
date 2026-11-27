@@ -85,6 +85,8 @@ def handle_schedule_policy_register(
                 batch, result = scheduler.result_queue.popleft()
                 scheduler.process_batch_result(batch, result)
 
+        scheduler.policy.engine_view = scheduler.get_scheduling_engine_view(scheduler.running_batch)
+
         scheduler.policy.register(
             register_policy_name,
             rank_fn,
@@ -106,7 +108,10 @@ def handle_schedule_policy_register(
 
                 for req in sorted(live_reqs, key =lambda req: req.rid):
                     if not req.finished():
-                        entry.initialize_request(req)
+                        entry.initialize_request(
+                            req,
+                            engine_view=scheduler.policy.engine_view,
+                        )
         except Exception:
             scheduler.policy.policy_registry.pop(register_policy_name)
             raise

@@ -7,17 +7,27 @@ from array import array
 from sglang.srt.environ import envs
 from sglang.srt.managers.prefill_delayer import PrefillDelayerSinglePassExecutor
 from sglang.srt.managers.scheduler_components.schedule_events import (
+    EVENT_INPUTS,
     SchedulingEvent,
     EventHandler,
+    SchedulingEngineView,
+)
+from sglang.srt.managers.scheduler_components.scheduling_policy import (
+    dfs_weight,
+    fcfs,
+    hrrn,
+    lof,
+    lpm,
+    random_policy,
+    routing_key,
+    shortest_prefill_first,
 )
 from sglang.srt.runtime_context import (
-    get_disagg,
     get_exec,
     get_schedule,
 )
-from sglang.srt.utils import get_bool_env_var, is_gfx95_supported, is_hip
+from sglang.srt.utils import is_gfx95_supported, is_hip
 
-_ROUTING_KEY_POLICY_DEBUG_LOG = get_bool_env_var("SGLANG_ROUTING_KEY_POLICY_DEBUG_LOG")
 logger = logging.getLogger(__name__)
 
 # Copyright 2023-2024 SGLang Team
@@ -36,13 +46,11 @@ logger = logging.getLogger(__name__)
 """Request scheduler policy"""
 
 import os
-import random
-from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import lru_cache, partial
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Callable, Any
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Callable, Any
 
 import torch
 
@@ -68,11 +76,10 @@ from sglang.srt.mem_cache.allocator.unified_mamba import (
 from sglang.srt.mem_cache.base_prefix_cache import (
     BasePrefixCache,
     InitLoadBackParams,
-    InsertParams,
     MatchPrefixParams,
     zero_match_result,
 )
-from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
+from sglang.srt.mem_cache.radix_cache import RadixKey, TreeNode
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
@@ -96,22 +103,6 @@ def _use_exact_chunk_fill() -> bool:
     partial tile.
     """
     return envs.SGLANG_EXACT_CHUNK_FILL.get() and is_gfx95_supported()
-
-
-# Threshold for in-batch prefix cache.
-# If a request has a matched prefix length (against existing cache) less than this value,
-# the scheduler runs the in-batch prefix caching check for this request.
-# If we set it to -1, it means we disable in-batch prefix caching.
-IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD = int(
-    os.environ.get("IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD", "32")
-)
-
-# Threshold for in-batch prefix cache.
-# If a request has a matched prefix length (within the waiting queue) larger than this value,
-# the scheduler deprioritizes this request
-IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD = int(
-    os.environ.get("IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD", "32")
-)
 
 
 IGNORE_EOS_RESERVE_TOKENS = 1
@@ -251,9 +242,17 @@ class PolicyEntry:
     )
 
     def rank(self, waiting_queue: List[Req], *args, **kwargs) -> None:
+        if "request_data" in self.rank_fn_parameters:
+            kwargs.setdefault("request_data", self.request_data)
+        if "policy_data" in self.rank_fn_parameters:
+            kwargs.setdefault("policy_data", self.policy_data)
         self.rank_fn(waiting_queue, *args, **kwargs)
 
-    def initialize_request(self, req: Req) -> None:
+    def initialize_request(
+        self, 
+        req: Req,
+        engine_view: SchedulingEngineView,
+    ) -> None:
         if self.initialize_request_fn is None:
             return
 
@@ -262,6 +261,7 @@ class PolicyEntry:
 
         available_parameters = {
             "policy_data": self.policy_data,
+            "engine_view": engine_view,
         }
         kwargs = {
             name: available_parameters[name]
@@ -272,50 +272,68 @@ class PolicyEntry:
     def release_request(self, req: Req) -> None:
         self.request_data.pop(req.rid, None)
 
-    def trigger_event(self, event: SchedulingEvent, req: Req) -> None:
+    def trigger_event(self, event: SchedulingEvent, **event_inputs) -> None:
         handler = self.event_handlers.get(event)
         if handler is not None:
-            handler(req)
+            handler(**event_inputs)
 
 class SchedulePolicy:
     def __init__(
         self,
         policy: str,
-        tree_cache: BasePrefixCache,
-        enable_hierarchical_cache: bool,
-        enable_priority_scheduling: bool,
-        schedule_low_priority_values_first: bool,
+        engine_view: SchedulingEngineView
     ):
-        self.tree_cache = tree_cache
-        self.enable_hierarchical_cache = enable_hierarchical_cache
-        self.enable_priority_scheduling = enable_priority_scheduling
-        self.schedule_low_priority_values_first = schedule_low_priority_values_first
-        self.priority_sign = 1 if schedule_low_priority_values_first else -1
-        self._shortest_prefill_calls = 0
-
-        # It is used to find the matching prefix for in-batch prefix caching.
-        self.waiting_queue_radix_tree = RadixCache.create_simulated()
+        self.engine_view = engine_view
         self.policy_registry: dict[str, PolicyEntry] = {}
 
         self.init_builtin_schedule_policy()
-        self.policy = self._validate_and_adjust_policy(policy, tree_cache)
+        self.policy = self._validate_and_adjust_policy(policy, engine_view.tree_cache)
 
     def init_builtin_schedule_policy(self) -> None:
-        fcfs_rank = (
-            self._sort_by_priority_and_fcfs
-            if self.enable_priority_scheduling
-            else self._sort_by_fcfs
+        self.register(
+            "fcfs",
+            fcfs.rank,
+            initialize_policy_fn=fcfs.initialize_policy,
+        )
+        self.register(
+            "lpm",
+            lpm.rank,
+            initialize_policy_fn=lpm.initialize_policy,
+        )
+        self.register(
+            "dfs-weight",
+            dfs_weight.rank,
+            initialize_policy_fn=dfs_weight.initialize_policy,
+        )
+        self.register(
+            "shortest-prefill-first",
+            shortest_prefill_first.rank,
+            initialize_policy_fn=shortest_prefill_first.initialize_policy,
+        )
+        self.register("lof", lof.rank, initialize_policy_fn=lof.initialize_policy)
+        self.register(
+            "routing-key",
+            routing_key.rank,
+            initialize_policy_fn=routing_key.initialize_policy,
+            hooks={SchedulingEvent.ON_SORT: routing_key.on_sort},
+        )
+        self.register(
+            "random",
+            random_policy.rank,
+            initialize_policy_fn=random_policy.initialize_policy,
         )
 
-        self.register("fcfs", fcfs_rank)
-        self.register("lpm", self._sort_by_longest_prefix)
-        self.register("dfs-weight", self._sort_by_dfs_weight)
-        self.register("hrrn", self._sort_by_hrrn)
-        self.register("shortest-prefill-first", self._sort_by_shortest_prefill)
-        self.register("lof", self._sort_by_longest_output)
-        self.register("routing-key", self._sort_by_routing_key)
-        self.register("random", self._sort_randomly)
-
+        self.register(
+            "hrrn",
+            hrrn.rank,
+            initialize_policy_fn=hrrn.initialize_policy,
+            initialize_request_fn=hrrn.initialize_request,
+            hooks={
+                SchedulingEvent.ENABLE: hrrn.enable,
+                SchedulingEvent.ON_PREEMPT: hrrn.on_preempt,
+                SchedulingEvent.ON_COMPUTE: hrrn.on_compute,
+            },
+        )
 
     def register(
             self, 
@@ -323,7 +341,7 @@ class SchedulePolicy:
             rank_fn: Callable[..., None], 
             *, 
             initialize_request_fn: Optional[Callable[..., Any]] = None,
-            initialize_policy_fn: Optional[Callable[[], Any]] = None,
+            initialize_policy_fn: Optional[Callable[..., Any]] = None,
             hooks: Optional[
                 dict[SchedulingEvent, Callable[..., None]]
             ] = None
@@ -348,6 +366,10 @@ class SchedulePolicy:
         rank_fn_signature = inspect.signature(rank_fn)
         rank_fn_parameters = []
         for parameter in rank_fn_signature.parameters.values():
+            if parameter.name not in ("waiting_queue", "engine_view", "request_data", "policy_data"):
+                raise ValueError(
+                    f"Unsupported rank parameter: {parameter.name!r}"
+                )
             rank_fn_parameters.append(parameter.name)
 
         initialize_request_fn_parameters = ()
@@ -356,7 +378,7 @@ class SchedulePolicy:
             initialize_request_fn_parameters = tuple(signature.parameters)[1:]
 
             for parameter_name in initialize_request_fn_parameters:
-                if parameter_name != "policy_data":
+                if parameter_name not in ("policy_data", "engine_view"):
                     raise ValueError(
                         f"Unsupported request initializer parameter: "
                         f"{parameter_name!r}"
@@ -371,11 +393,25 @@ class SchedulePolicy:
                 },
             )
 
-        policy_data = (
-            initialize_policy_fn()
-            if initialize_policy_fn is not None
-            else None
-        )
+        policy_data = None
+        if initialize_policy_fn is not None:
+            signature = inspect.signature(initialize_policy_fn)
+            framework_parameters = {
+                "engine_view": self.engine_view
+            }
+
+            kwargs = {}
+            for parameter_name in signature.parameters:
+                if parameter_name not in framework_parameters:
+                    raise ValueError(
+                        f"Unsupported policy initializer parameter: "
+                        f"{parameter_name!r}"
+                    )
+
+                kwargs[parameter_name] = framework_parameters[parameter_name]
+
+            signature.bind(**kwargs)
+            policy_data = initialize_policy_fn(**kwargs)
 
         entry = PolicyEntry(
             name=name,
@@ -393,7 +429,7 @@ class SchedulePolicy:
             if not callable(fn):
                 raise ValueError(f"Handler for {event.value!r} must be callable")
 
-            entry.event_handlers[event] = self._bind_event_handler(entry, fn)
+            entry.event_handlers[event] = self._bind_event_handler(entry, event, fn)
 
         self.policy_registry[name] = entry
 
@@ -415,11 +451,12 @@ class SchedulePolicy:
         entry.request_data.clear()
 
     def activate(self, name: str) -> None:
-        self.policy = self._validate_and_adjust_policy(name, self.tree_cache)
+        self.policy = self._validate_and_adjust_policy(name, self.engine_view.tree_cache)
 
     @staticmethod
     def _bind_event_handler(
         entry: PolicyEntry,
+        event: SchedulingEvent,
         fn: Callable[..., None],
     ) -> EventHandler:
 
@@ -432,25 +469,20 @@ class SchedulePolicy:
         if "policy_data" in parameters:
             kwargs["policy_data"] = entry.policy_data
 
+        event_parameters = tuple(
+            name for name in EVENT_INPUTS[event] if name in parameters
+        )
+        signature.bind(**kwargs, **dict.fromkeys(event_parameters))
         bound_fn = partial(fn, **kwargs)
 
-        if "req" in parameters:
-            signature.bind(req=None, **kwargs)
-
-            def handler(req: Req) -> None:
-                bound_fn(req=req)
-
-        else:
-            signature.bind(**kwargs)
-
-            def handler(req: Req) -> None:
-                bound_fn()
+        def handler(**event_inputs) -> None:
+            bound_fn(**{name: event_inputs[name] for name in event_parameters})
 
         return handler
 
-    def trigger_event(self, event: SchedulingEvent, req: Req) -> None:
+    def trigger_event(self, event: SchedulingEvent, **event_inputs) -> None:
         for entry in self.policy_registry.values():
-            entry.trigger_event(event, req)
+            entry.trigger_event(event, **event_inputs)
 
     def calc_priority(self, waiting_queue: List[Req], *args, **kwargs) -> None:
         self.policy.rank(waiting_queue, *args, **kwargs)
@@ -465,7 +497,7 @@ class SchedulePolicy:
         policy = self._determine_active_policy(waiting_queue)
         return (
             policy.name in ("lpm", "dfs-weight", "hrrn", "shortest-prefill-first")
-            or self.tree_cache.supports_fast_match_prefix()
+            or self.engine_view.tree_cache.supports_fast_match_prefix()
         )
 
     def _validate_and_adjust_policy(
@@ -487,96 +519,12 @@ class SchedulePolicy:
 
         return entry
 
-    def _compute_prefix_matches(self, waiting_queue: List[Req]) -> Set[int]:
-        """
-        Computes and caches the matching prefixes for requests in the waiting queue,
-            and handles in-batch prefix caching logic.
-        """
-        temporary_deprioritized: Set[int] = set()
-        self.waiting_queue_radix_tree.reset()
-
-        for r in waiting_queue:
-            prefix_ids = r.origin_input_ids + r.output_ids
-            extra_key = r.extra_key
-            cache_salt = r.cache_salt
-            match_result = match_prefix_for_req(
-                self.tree_cache, r, prefix_ids, include_req=True
-            )
-
-            # NOTE(sang): This logic is for in-batch prefix caching;
-            # If there are more than 1 request that have small matching prefix from
-            # existing cache, but all those requests share the same prefix, we prefer
-            # to schedule only one of them so that we can increase the cache hit rate.
-            # We prefer to set IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD > 0 because too small
-            # threshold means we cannot use in-batch prefix caching for short prefixes.
-            # It is kind of common when the engine is long running (e.g., imagine the prefix "the").
-            if len(r.prefix_indices) <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD:
-                match_result = self.waiting_queue_radix_tree.match_prefix(
-                    MatchPrefixParams(
-                        key=RadixKey(
-                            token_ids=prefix_ids,
-                            extra_key=extra_key,
-                            cache_salt=cache_salt,
-                        )
-                    )
-                )
-                if envs.SGLANG_RADIX_FORCE_MISS.get():
-                    match_result = zero_match_result(
-                        self.waiting_queue_radix_tree, match_result, extra_key=extra_key
-                    )
-                in_batch_matching_prefixes = match_result.device_indices
-                if (
-                    len(in_batch_matching_prefixes)
-                    >= IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD
-                ):
-                    temporary_deprioritized.add(r.rid)
-                else:
-                    # Insert with a dummy key
-                    self.waiting_queue_radix_tree.insert(
-                        InsertParams(
-                            key=RadixKey(
-                                token_ids=prefix_ids,
-                                extra_key=extra_key,
-                                cache_salt=cache_salt,
-                            ),
-                            value=torch.empty(len(prefix_ids), dtype=torch.bool),
-                        )
-                    )
-        return temporary_deprioritized
-
-    def _match_prefixes_for_load(self, waiting_queue: List[Req]) -> None:
-        """Populate load-reporting data for sorts that do not use cache matches."""
-        if (
-            self.tree_cache.supports_fast_match_prefix()
-            and get_disagg().disaggregation_mode != "decode"
-        ):
-            for req in waiting_queue:
-                match_prefix_for_req(self.tree_cache, req, include_req=True)
-
     @staticmethod
     def _shortest_prefill_work(r: Req) -> int:
         return max(
             1,
             len(r.origin_input_ids) + len(r.output_ids) - r.num_matched_prefix_tokens,
         )
-
-    def _sort_by_shortest_prefill(self, waiting_queue: List[Req]) -> None:
-        # Prioritize short uncached prefills while deferring duplicate prefixes.
-        temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
-        waiting_queue.sort(
-            key=lambda r: (
-                r.rid in temporary_deprioritized,
-                SchedulePolicy._shortest_prefill_work(r),
-                r.time_stats.wait_queue_entry_time,
-            )
-        )
-        self._shortest_prefill_calls += 1
-        if waiting_queue and self._shortest_prefill_calls % 128 == 1:
-            logger.info(
-                "Experimental shortest-prefill-first: queue=%d shortest_uncached=%d",
-                len(waiting_queue),
-                self._shortest_prefill_work(waiting_queue[0]),
-            )
 
     def shortest_prefill_chunk_limit(
         self, chunked_req: Req, waiting_queue: List[Req], budget: int, page_size: int
@@ -598,145 +546,6 @@ class SchedulePolicy:
             return None
         # Page alignment keeps continuation boundaries allocator-compatible.
         return (budget - reserved) // page_size * page_size
-
-    def _sort_by_longest_prefix(self, waiting_queue: List[Req]) -> None:
-        """Prepare prefix matches and sort by the longest cached prefix."""
-        if len(waiting_queue) > 128:
-            # Turn off the expensive prefix matching and sorting when the #queue is large.
-            self.policy_registry["fcfs"].rank_fn(waiting_queue)
-            return
-
-        temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
-        waiting_queue.sort(
-            key=lambda r: (
-                -r.num_matched_prefix_tokens
-                if r.rid not in temporary_deprioritized
-                else float("inf")
-            )
-        )
-
-    @staticmethod
-    def _uncached_len(r: Req) -> int:
-        """Number of tokens that must actually be prefilled for this req
-        (all cache levels — device + host via hicache — counted as cached)."""
-        return max(0, len(r.origin_input_ids) - r.num_matched_prefix_tokens)
-
-    def _sort_by_hrrn(
-        self, waiting_queue: List[Req], processed_tokens: int = 0
-    ) -> None:
-        """Highest Response Ratio Next, with token-based aging.
-
-        Equivalence with classic HRRN when throughput is constant:
-            ratio = 1 + wait_sec / est_prefill_time
-                  = 1 + (processed_tokens - arrival_processed_tokens) / uncached
-
-        Caller (Scheduler) contract:
-          - Maintain a monotonically increasing counter of prefill tokens processed so far
-            (accumulate batch.extend_num_tokens per forward). Pass it in as `processed_tokens`.
-          - Snapshot `req.arrival_processed_tokens = counter` when the req enters waiting_queue
-            (pop_bootstrapped for disagg prefill, _add_request_to_queue for unified).
-
-        Call sites that omit `processed_tokens` use 0, so positive uncached
-        lengths tie and are ordered by rid.
-        """
-        if len(waiting_queue) > 128:
-            # Skip the expensive matching pass for large waiting queues.
-            self.policy_registry["fcfs"].rank_fn(waiting_queue)
-            return
-
-        temporary_deprioritized = self._compute_prefix_matches(waiting_queue)
-
-        def _key(r: Req):
-            rid = r.rid
-            if rid in temporary_deprioritized:
-                return (float("inf"), rid)
-            uncached = SchedulePolicy._uncached_len(r)
-            if uncached <= 0:
-                # No prefill work; drain immediately.
-                return (-float("inf"), rid)
-            waited_tokens = max(0, processed_tokens - r.arrival_processed_tokens)
-            ratio_delta = waited_tokens / uncached
-            return (-ratio_delta, rid)
-
-        waiting_queue.sort(key=_key)
-
-    def _sort_by_dfs_weight(self, waiting_queue: List[Req]) -> None:
-        """Sorts the waiting queue based on a depth-first search weighting."""
-        self._compute_prefix_matches(waiting_queue)
-        order = self.tree_cache.dfs_weight_order(
-            [req.last_node for req in waiting_queue]
-        )
-        waiting_queue[:] = [waiting_queue[index] for index in order]
-
-    def _sort_by_longest_output(self, waiting_queue: List[Req]) -> None:
-        """Sorts the waiting queue based on the longest output (max_new_tokens). If using priority scheduling, sort by priority first."""
-        self._match_prefixes_for_load(waiting_queue)
-        if self.enable_priority_scheduling:
-            waiting_queue.sort(
-                key=lambda x: (
-                    x.priority * self.priority_sign,
-                    -x.sampling_params.max_new_tokens,
-                )
-            )
-        else:
-            waiting_queue.sort(key=lambda x: -x.sampling_params.max_new_tokens)
-
-    def _sort_randomly(self, waiting_queue: List[Req]) -> None:
-        """Shuffles the waiting queue randomly."""
-        self._match_prefixes_for_load(waiting_queue)
-        random.shuffle(waiting_queue)
-
-    def _sort_by_priority_and_fcfs(self, waiting_queue: List[Req]) -> None:
-        """Sorts the waiting queue based on the request priority then received titmestamp."""
-        self._match_prefixes_for_load(waiting_queue)
-        waiting_queue.sort(
-            key=lambda x: (
-                x.priority * self.priority_sign,
-                x.time_stats.wait_queue_entry_time,
-            )
-        )
-
-    def _sort_by_fcfs(self, waiting_queue: List[Req]) -> None:
-        """Sorts the waiting queue by received timestamp"""
-        self._match_prefixes_for_load(waiting_queue)
-        waiting_queue.sort(key=lambda x: x.time_stats.wait_queue_entry_time)
-
-    def _sort_by_routing_key(
-        self,
-        waiting_queue: List[Req],
-        running_batch: Optional[ScheduleBatch] = None,
-    ) -> None:
-        """Sorts waiting queue by routing key frequency in running batch."""
-        self._match_prefixes_for_load(waiting_queue)
-        if running_batch is None:
-            return
-        routing_key_counts = Counter(
-            r.routing_key for r in running_batch.reqs if r.routing_key
-        )
-
-        if _ROUTING_KEY_POLICY_DEBUG_LOG:
-            waiting_keys_before = [r.routing_key for r in waiting_queue]
-            logger.info(
-                f"routing_key_counts={dict(routing_key_counts)}, "
-                f"waiting_keys_before={waiting_keys_before}"
-            )
-
-        if not routing_key_counts:
-            return
-
-        def sort_key(req: Req):
-            key = req.routing_key
-            if key and key in routing_key_counts:
-                count = routing_key_counts[key]
-                return (0, -count, key)
-            else:
-                return (1, 0, key or "")
-
-        waiting_queue.sort(key=sort_key)
-
-        if _ROUTING_KEY_POLICY_DEBUG_LOG:
-            waiting_keys_after = [r.routing_key for r in waiting_queue]
-            logger.info(f"waiting_keys_after={waiting_keys_after}")
 
 
 class AddReqResult(Enum):
